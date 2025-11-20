@@ -1,0 +1,21 @@
+dependencies:
+  espressif/mavlink:
+    component_hash: 06bd18a376a5bcc5ff7d4dddfe1a704e1f32b9920e284d2fbd795377b0c1755d
+    dependencies:
+    - name: idf
+      require: private
+      version: '>=4.3.0'
+    source:
+      registry_url: https://components.espressif.com/
+      type: service
+    version: 1.0.0~1
+  idf:
+    source:
+      type: idf
+    version: 5.4.2
+direct_dependencies:
+- espressif/mavlink
+- idf
+manifest_hash: ee8175437deff85680b5bd31f672891238badf68b3b9df9b3000bf55ea5d5de0
+target: esp32s3
+version: 2.0.0
