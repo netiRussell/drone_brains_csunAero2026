@@ -17,7 +17,7 @@
 #define UART_PORT_NUM 2
 
 #define MAVLINK_SYSTEM_ID 2
-#define MAVLINK_COMPONENT_ID 191 
+#define MAVLINK_COMPONENT_ID MAV_COMP_ID_ONBOARD_COMPUTER 
 
 // --- Task handlers ---
 static TaskHandle_t uart_communicator_taskHandler = NULL;
@@ -51,32 +51,63 @@ void uart_communicator( void* pvParameters ){
     ESP_ERROR_CHECK( uart_set_mode(UART_PORT_NUM, UART_MODE_UART) );
 
     /* Debugging, to be converted into ISR-based approach ----------------------------------------*/
-    uint8_t buffer[128];
+    uint8_t bufferTX[128];
 
+    // Declare the msg struct and ensure it doesn't contain any memory noise
+    mavlink_message_t msg = {0};
     // Generate the message for requesting data
-    mavlink_message_t* msg = {};        
-    mavlink_msg_command_long_pack(MAVLINK_SYSTEM_ID, MAV_COMP_ID_ONBOARD_COMPUTER, msg, 1, 0, 512, 0, 33, 0, 0, 0, 0, 0, 0);
+    mavlink_msg_command_long_pack(MAVLINK_SYSTEM_ID, MAVLINK_COMPONENT_ID, &msg, 1, 0, 512, 0, 33, 0, 0, 0, 0, 0, 0);
 
     // Pack the message to get the final MavLink data pocket to be transmitted over UART
-    uint16_t mavlinkData_len = mavlink_msg_to_send_buffer(buffer, msg);
+    uint16_t mavlinkData_len = mavlink_msg_to_send_buffer(bufferTX, &msg);
     ESP_LOGI( printerTask, "Mavlink data has %d length", mavlinkData_len );
-    ESP_LOGI( printerTask, "DEBUG: %d", MAV_COMP_ID_ONBOARD_COMPUTER );
 
     // Write data to UART.
-    uart_write_bytes(UART_PORT_NUM, buffer, sizeof(buffer) / sizeof(uint8_t));
+    uart_write_bytes(UART_PORT_NUM, bufferTX, mavlinkData_len);
 
     // Wait for the response to come in
-    vTaskDelay(10000/portTICK_PERIOD_MS);
+    //vTaskDelay(10000/portTICK_PERIOD_MS);
     ESP_LOGI( printerTask, "Getting data from uart..." );
 
     // Read data from UART.
-    uint8_t data[128];
+    // TODO: turn the logic into "read byte ->  parse byte". Curent logic: "read all -> parse all byte by byte" is inefficient.
+    uint8_t bufferRX[128];
     int length = 0;
     ESP_ERROR_CHECK(uart_get_buffered_data_len(UART_PORT_NUM, (size_t*)&length));
-    length = uart_read_bytes(UART_PORT_NUM, data, length, 100);
+    length = uart_read_bytes(UART_PORT_NUM, bufferRX, length, 100);
 
-    for(uint8_t i = 0; i < 128; i++){
-        ESP_LOGI( printerTask, "Data %d: %d", i, data[i] );
+    // Reset the msg holder
+    msg = (mavlink_message_t){0};
+
+    // Declare and reset the status holder
+    mavlink_status_t r_mavlink_status = {0};
+
+    // Populate the msg
+    uint8_t status = -1;
+    for(uint8_t i = 0; i < length; i++){
+        status = mavlink_parse_char(MAVLINK_COMM_0, bufferRX[i], &msg, &r_mavlink_status);
+
+        if(status == 0){
+            ESP_LOGI( printerTask, "[WARNING] Data#%d - message could be decoded or bad CRC", i );
+        } else {
+            ESP_LOGI( printerTask, "Received message with ID %d, sequence: %d from component %d of system %d\n", msg.msgid, msg.seq, msg.compid, msg.sysid );
+        }
+    }
+
+    // Declare and reset the global position data holder
+    mavlink_global_position_int_t glob_pos_int_holder = {0};
+    
+    // Decode the msg to get the needed data
+    if(msg.msgid == MAVLINK_MSG_ID_GLOBAL_POSITION_INT) {    
+        
+        // Get all fields in payload (into global_position)
+        // TODO: change logic to getting a single field
+        mavlink_msg_global_position_int_decode(&msg, &glob_pos_int_holder);
+
+        // Print the resulting data
+        ESP_LOGI( printerTask, "!---FINAL DATA---!\nRelative altitude: %ld", glob_pos_int_holder.relative_alt);
+    } else {
+        ESP_LOGI(printerTask, "[WARNING] Incorrect msgid: %d", msg.msgid);
     }
 
     // Flush the RX FIFO buffer
@@ -89,6 +120,7 @@ void uart_communicator( void* pvParameters ){
 
     while( true ){ 
         // endless loop
+        vTaskDelay(100/portTICK_PERIOD_MS);
     }
 
     // Optional UART clearing
