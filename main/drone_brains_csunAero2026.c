@@ -41,16 +41,17 @@ static void handle_mavlink_msg( mavlink_message_t* msg ){
                 ESP_LOGI( printerTask, "!---FINAL DATA---!\nRelative altitude: %ld", glob_pos_int_holder.relative_alt);
             }
             break;
-        
+        /*
         case MAVLINK_MSG_ID_HEARTBEAT:
             {
                 ESP_LOGI(printerTask, "Heart beat received.");
             }
             break;
+        */
         
         default:
             {
-                ESP_LOGI(printerTask, "[WARNING] Incorrect msgid: %d", msg->msgid);
+                // ESP_LOGI(printerTask, "[WARNING] Incorrect msgid: %d", msg->msgid);
             }
             break;
     }
@@ -80,36 +81,26 @@ void uart_receiver( void* pvParameters ){
 void uart_sender( void* pvParameters ){
     /* Debugging, to be converted into ISR-based approach ----------------------------------------*/
     uint8_t bufferTX[128];
-
+    
     // Declare the msg struct and ensure it doesn't contain any memory noise
     mavlink_message_t msg = {0};
     // Generate the message for requesting data
     mavlink_msg_command_long_pack(MAVLINK_SYSTEM_ID, MAVLINK_COMPONENT_ID, &msg, 1, 0, 512, 0, 33, 0, 0, 0, 0, 0, 0);
-
+    
     // Pack the message to get the final MavLink data pocket to be transmitted over UART
     uint16_t mavlinkData_len = mavlink_msg_to_send_buffer(bufferTX, &msg);
     ESP_LOGI( printerTask, "Mavlink data has %d length", mavlinkData_len );
-
-    // Write data to UART.
-    uart_write_bytes(UART_PORT_NUM, bufferTX, mavlinkData_len);
-
-    // Wait for the response to come in
-    //vTaskDelay(10000/portTICK_PERIOD_MS);
-    ESP_LOGI( printerTask, "Getting data from uart..." );
-
-    // Read data from UART.
-    // TODO: turn the logic into "read byte ->  parse byte". Curent logic: "read all -> parse all byte by byte" is inefficient.
-    uint8_t bufferRX[128];
-    int length = 0;
-    ESP_ERROR_CHECK(uart_get_buffered_data_len(UART_PORT_NUM, (size_t*)&length));
-    length = uart_read_bytes(UART_PORT_NUM, bufferRX, length, 100);
     
-    /* End of debugging ------------------------------------------------------------------------- */
-
     while( true ){ 
-        // endless loop
-        vTaskDelay(100/portTICK_PERIOD_MS);
+        // Write data to UART.
+        uart_write_bytes(UART_PORT_NUM, bufferTX, mavlinkData_len);
+
+        ESP_LOGI( printerTask, "Getting data from uart..." ); 
+
+        // Wait for the response to come in
+        vTaskDelay(500/portTICK_PERIOD_MS);
     }
+    /* End of debugging ------------------------------------------------------------------------- */
 
     // Optional UART clearing
     // uart_driver_delete( uart_num );
@@ -149,9 +140,10 @@ void app_main(void) {
  
     // Enable interrupts
     //ESP_ERROR_CHECK( uart_enable_intr_mask(TO BE FINISHED...) );
-
     // -- UART init end --
 
+
+    // -- RTOS tasks declarations --
     // A task for reseiving data over UART(using Mavlink2 as the payload format)
     BaseType_t status = xTaskCreatePinnedToCore(
         uart_receiver, // function
@@ -167,9 +159,8 @@ void app_main(void) {
         ESP_LOGE( printerTask, "Failed to create the UART_RECEIVER task" );
     }
     
-    /*    
     // A task for requesting data over UART(using Mavlink2 as the payload format)
-    BaseType_t status = xTaskCreatePinnedToCore(
+    status = xTaskCreatePinnedToCore(
         uart_sender, // function
         "UART_SENDER", // name
         4096, // stack size in bytes
@@ -182,5 +173,4 @@ void app_main(void) {
     if(status != pdPASS){
         ESP_LOGE( printerTask, "Failed to create the UART_SENDER task" );
     }
-    */
 }
