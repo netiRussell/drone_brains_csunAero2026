@@ -30,15 +30,19 @@ static void handle_mavlink_msg( mavlink_message_t* msg ){
     switch( msg->msgid ){
         case MAVLINK_MSG_ID_GLOBAL_POSITION_INT:
         {
-                // Declare and reset the global position data holder
-                mavlink_global_position_int_t glob_pos_int_holder = {0};
+                /* // To be utilied if more info is needed: 
+                    // Declare and reset the global position data holder
+                    mavlink_global_position_int_t glob_pos_int_holder = {0};
+                    
+                    // Get all fields in payload (into global_position)
+                    // TODO: change logic to getting a single field
+                    mavlink_msg_global_position_int_decode(msg, &glob_pos_int_holder);
+                */
 
-                // Get all fields in payload (into global_position)
-                // TODO: change logic to getting a single field
-                mavlink_msg_global_position_int_decode(msg, &glob_pos_int_holder);
+                uint32_t rel_alt = mavlink_msg_global_position_int_get_relative_alt(msg);
 
                 // Print the resulting data
-                ESP_LOGI( printerTask, "!---FINAL DATA---!\nRelative altitude: %ld", glob_pos_int_holder.relative_alt);
+                ESP_LOGI( printerTask, "[DATA] Relative altitude: %ld", rel_alt);
             }
             break;
         /*
