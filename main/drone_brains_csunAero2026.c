@@ -36,6 +36,12 @@ static TaskHandle_t uart_receiver_taskHandler = NULL;
 static TaskHandle_t gate_taskHandler = NULL;
 static const char* printerTask = "printer"; // TO BE DELETED AFTER DEBUGGING: used to print out msgs to the terminal
 
+// --- ISR ---
+static void IRAM_ATTR pwm_gate_rec_handler(void* arg){
+    // Notify the pick-up mechanism(gate) that it start rising now
+    xTaskNotifyGiveIndexed(gate_taskHandler, 1);
+}
+
 // --- Helper functions ---
 static void handle_mavlink_msg( mavlink_message_t* msg ){
     
@@ -145,8 +151,8 @@ void gate_controller( void* pvParameters ){
 
 
         // -- Wait for the trigger to ensure the payload is inside --
-        // ulTaskNotifyTakeIndexed(1, 0, portMAX_DELAY);
-        vTaskDelay(2000/portTICK_PERIOD_MS); // TO BE DELETED
+        ulTaskNotifyTakeIndexed(1, 0, portMAX_DELAY);
+        //vTaskDelay(2000/portTICK_PERIOD_MS); // TO BE DELETED
 
 
         // -- Raise the gate --
@@ -220,7 +226,22 @@ void uart_sender( void* pvParameters ){
 // TODO: Implement sleep modes
 void app_main(void) {
 
-    // TODO: move the init logic to a separate task
+    // -- ISR based, GPIO init --
+    // The GPIO will wait for the payload to close an open circuit to trigger the raise of the pick-up mechanism
+    
+    // GPIO config
+    gpio_config_t pwm_gate_gpio_config = {0};
+    pwm_gate_gpio_config.pin_bit_mask = PWM_GATE_GPIO_NUM_REC;
+    pwm_gate_gpio_config.mode = GPIO_MODE_OUTPUT;
+    pwm_gate_gpio_config.pull_up_en = GPIO_PULLUP_DISABLE;
+    pwm_gate_gpio_config.pull_down_en = GPIO_PULLDOWN_ENABLE;
+    pwm_gate_gpio_config.intr_type = GPIO_INTR_HIGH_LEVEL;
+    ESP_ERROR_CHECK( gpio_config(&pwm_gate_gpio_config) );
+
+    // Configure ISR
+    ESP_ERROR_CHECK( gpio_install_isr_service(0) );
+    ESP_ERROR_CHECK( gpio_isr_handler_add(PWM_GATE_GPIO_NUM_REC, pwm_gate_rec_handler, NULL) );
+
     // -- UART init begin --
     // Setup UART buffered IO with event queue
     const uint16_t uart_buffer_size = (1024 * 2);
