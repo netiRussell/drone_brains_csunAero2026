@@ -9,6 +9,7 @@
 #include "driver/uart.h"
 #include "driver/gpio.h"
 #include "driver/ledc.h"
+#include "driver/rmt_tx.h"
 #include <c_library_v2/common/mavlink.h>
 
 // Macros
@@ -30,10 +31,13 @@
 #define PWM_GATE_SPEED_MODE     LEDC_LOW_SPEED_MODE
 #define PWM_GATE_CHANNEL        LEDC_CHANNEL_0
 
+#define RMT_GPIO_NUM    ? // TODO: figure out if D3 is suitable, and what is its GPIO number
+
 // --- Task handlers ---
 static TaskHandle_t uart_sender_taskHandler = NULL;
 static TaskHandle_t uart_receiver_taskHandler = NULL;
 static TaskHandle_t gate_taskHandler = NULL;
+static TaskHandle_t ir_taskHandler = NULL;
 static const char* printerTask = "printer"; // TO BE DELETED AFTER DEBUGGING: used to print out msgs to the terminal
 
 // --- ISR ---
@@ -85,11 +89,45 @@ static void handle_mavlink_msg( mavlink_message_t* msg ){
 }
 
 // --- Task definitions ---
+void ir_controller( void* pvParameters ){
+    /*
+        [INFO] Notification Indexes
+        Index 0 source - gate_controller, whenever the gate is lowered 
+    */
+
+    // -- Init --
+    // TX channel init
+    rmt_channel_handle_t tx_chan = NULL;
+    rmt_tx_channel_config_t tx_chan_config = {
+        .clk_src = RMT_CLK_SRC_DEFAULT,   // select source clock
+        .gpio_num = RMT_GPIO_NUM,         // GPIO number
+        .mem_block_symbols = 64,          // memory block size, 64 * 4 = 256 Bytes
+        .resolution_hz = 1 * 1000 * 1000, // 1 MHz tick resolution, i.e., 1 tick = 1 µs
+        .trans_queue_depth = 4,           // set the number of transactions that can pend in the background
+        .flags.invert_out = false,        // do not invert output signal
+        .flags.with_dma = false,          // do not need DMA backend
+    };
+    ESP_ERROR_CHECK(rmt_new_tx_channel(&tx_chan_config, &tx_chan));
+
+    //
+
+    // -- Main logic --
+    while( true ){
+        // -- [BLOCKING] Wait for the notification --
+        ulTaskNotifyTakeIndexed(0, 0, portMAX_DELAY);
+        ESP_LOGI(printerTask, "IR has been triggered");
+
+        // While the payload hasn't arrivied, keep sending the NEC signal
+        // TODO: implement shared with gate_controller resource
+        vTaskDelay(1000/portTICK_PERIOD_MS);
+    }
+}
+
 void gate_controller( void* pvParameters ){
     /*
-        [Info] Notification Indexes
+        [INFO] Notification Indexes
         Index 0 source - handle_mavlink_msg, whenever the drone has landed
-        Index 1 source - _, ISR triggered by the payload
+        Index 1 source - pwm_gate_rec_handler, ISR triggered by the payload
     */
 
     // --- Init the gate controller ---
@@ -143,14 +181,17 @@ void gate_controller( void* pvParameters ){
 
         // Wait for the gate to fully extend down
         vTaskDelay(2000/portTICK_PERIOD_MS);
-        
+
+        // Send the corresponding IR command
+        xTaskNotifyGiveIndexed(ir_taskHandler, 0);
+
         // Reset and Put the peripheral back to sleep
         ESP_ERROR_CHECK( ledc_set_duty(PWM_GATE_SPEED_MODE, PWM_GATE_CHANNEL, 0) ); // Reset the PWM 
         ESP_ERROR_CHECK( ledc_update_duty(PWM_GATE_SPEED_MODE, PWM_GATE_CHANNEL) ); // Apply the new PWM
         ESP_ERROR_CHECK( ledc_stop(PWM_GATE_SPEED_MODE, PWM_GATE_CHANNEL, 0) );
 
 
-        // -- Wait for the trigger to ensure the payload is inside --
+        // -- [BLOCKING] Wait for the trigger to ensure the payload is inside --
         ulTaskNotifyTakeIndexed(1, 0, portMAX_DELAY);
         //vTaskDelay(2000/portTICK_PERIOD_MS); // TO BE DELETED
 
@@ -223,7 +264,7 @@ void uart_sender( void* pvParameters ){
 
 // --- Main function ---
 // TODO: Implement log file for the error handling
-// TODO: Implement sleep modes
+// TODO: Use multiple cores
 void app_main(void) {
 
     // -- ISR based, GPIO init --
@@ -269,11 +310,10 @@ void app_main(void) {
  
     // Enable interrupts
     //ESP_ERROR_CHECK( uart_enable_intr_mask(TO BE FINISHED...) );
-    // -- UART init end --
 
 
     // -- RTOS tasks declarations --
-    // A task for requesting data over UART(using Mavlink2 as the payload format)
+    // A task for managing the pick-up mechanism
     BaseType_t status = xTaskCreatePinnedToCore(
         gate_controller, // function
         "GATE_CONTROLLER", // name
@@ -287,6 +327,23 @@ void app_main(void) {
     if(status != pdPASS){
         ESP_LOGE( printerTask, "Failed to create the UART_SENDER task" );
     }
+
+
+    // A task for managing the IR
+    status = xTaskCreatePinnedToCore(
+        ir_controller, // function
+        "IR_CONTROLLER", // name
+        4096, // stack size in bytes
+        NULL, // pvParameters
+        2, // Priority
+        &ir_taskHandler, // Handler to reffer to the task
+        1 // Core ID
+    );
+    
+    if(status != pdPASS){
+        ESP_LOGE( printerTask, "Failed to create the UART_SENDER task" );
+    }
+
 
     // A task for reseiving data over UART(using Mavlink2 as the payload format)
     status = xTaskCreatePinnedToCore(
@@ -303,6 +360,7 @@ void app_main(void) {
         ESP_LOGE( printerTask, "Failed to create the UART_RECEIVER task" );
     }
     
+
     // A task for requesting data over UART(using Mavlink2 as the payload format)
     status = xTaskCreatePinnedToCore(
         uart_sender, // function
@@ -316,7 +374,5 @@ void app_main(void) {
     
     if(status != pdPASS){
         ESP_LOGE( printerTask, "Failed to create the UART_SENDER task" );
-    }
-
-    
+    }  
 }
