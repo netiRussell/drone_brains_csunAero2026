@@ -1,3 +1,10 @@
+/*
+[WARNING] - This code requires multiple notification array entries.
+    To turn it on:
+    In menuconfig → Component config → FreeRTOS → Task notifications
+    Set “Number of task notification array entries” (or similarly named) to 2 or more.
+    That sets configTASK_NOTIFICATION_ARRAY_ENTRIES >= 2.
+*/
 #include <stdio.h>
 #include <string.h>
 #include <stdint.h>
@@ -22,16 +29,17 @@
 #define MAVLINK_SYSTEM_ID 2
 #define MAVLINK_COMPONENT_ID MAV_COMP_ID_ONBOARD_COMPUTER 
 
-#define ALT_GATE_THRESHOLD -500
+#define ALT_AIRBORNE_THRESHOLD 5000
+#define ALT_GATE_THRESHOLD 2000
 
-#define PWM_GATE_GPIO_NUM_SIG   6 // Sends the PWM signal, D5
-#define PWM_GATE_GPIO_NUM_REC   5 // Gets triggered when the payload is inside the pick-up mechanism, D4
+#define PWM_GATE_GPIO_NUM_SIG   5 // Sends the PWM signal, D4
+#define PWM_GATE_GPIO_NUM_REC   6 // Gets triggered when the payload is inside the pick-up mechanism, D5
 #define PWM_GATE_TIMER_ID       LEDC_TIMER_0
 #define PWM_GATE_TIMER_RES      LEDC_TIMER_12_BIT
 #define PWM_GATE_SPEED_MODE     LEDC_LOW_SPEED_MODE
 #define PWM_GATE_CHANNEL        LEDC_CHANNEL_0
 
-#define RMT_GPIO_NUM    ? // TODO: figure out if D3 is suitable, and what is its GPIO number
+#define RMT_GPIO_NUM    1 // TODO: figure out if D3 is suitable, and what is its GPIO number
 
 // --- Task handlers ---
 static TaskHandle_t uart_sender_taskHandler = NULL;
@@ -43,7 +51,10 @@ static const char* printerTask = "printer"; // TO BE DELETED AFTER DEBUGGING: us
 // --- ISR ---
 static void IRAM_ATTR pwm_gate_rec_handler(void* arg){
     // Notify the pick-up mechanism(gate) that it start rising now
-    xTaskNotifyGiveIndexed(gate_taskHandler, 1);
+    vTaskGenericNotifyGiveFromISR(gate_taskHandler, 1, NULL);
+
+    // Stop more interrupts from this pin until the gate is lowered again
+    gpio_intr_disable(PWM_GATE_GPIO_NUM_REC);
 }
 
 // --- Helper functions ---
@@ -61,7 +72,15 @@ static void handle_mavlink_msg( mavlink_message_t* msg ){
                     mavlink_msg_global_position_int_decode(msg, &glob_pos_int_holder);
                 */
 
-                uint32_t rel_alt = mavlink_msg_global_position_int_get_relative_alt(msg);
+                int32_t rel_alt = mavlink_msg_global_position_int_get_relative_alt(msg);
+
+                /*
+                    When the ALT_AIRBORNE_THRESHOLD is reached, change the value of the shared resource
+                    to represent AIRBORNE state machine and allow checking the gate threshold.
+                    As soon as the payload is picked up, reset the state machine to Stationary and wait 
+                    for the ALT_AIRBORNE_THRESHOLD again before allowing to check on the gate threshold
+                */
+
 
                 if( rel_alt < ALT_GATE_THRESHOLD ){
                     // Notify the gate controller to lower the gate
@@ -114,7 +133,7 @@ void ir_controller( void* pvParameters ){
     // -- Main logic --
     while( true ){
         // -- [BLOCKING] Wait for the notification --
-        ulTaskNotifyTakeIndexed(0, 0, portMAX_DELAY);
+        ulTaskNotifyTakeIndexed(0, pdTRUE, portMAX_DELAY);
         ESP_LOGI(printerTask, "IR has been triggered");
 
         // While the payload hasn't arrivied, keep sending the NEC signal
@@ -168,10 +187,10 @@ void gate_controller( void* pvParameters ){
     // --- Main logic ---
     while( true ){
         // -- [BLOCKING] Wait for the notification --
-        ulTaskNotifyTakeIndexed(0, 0, portMAX_DELAY);
+        ulTaskNotifyTakeIndexed(0, pdTRUE, portMAX_DELAY);
 
         // -- Lower the gate --
-        ESP_LOGI( printerTask, "Gate controller has been triggered..." );
+        ESP_LOGI( printerTask, "Gate controller has been triggered... duty = %ld", duty_2ms );
 
         // Wake up the PWM peripheral &
         // Send the corresponding Servo command
@@ -182,17 +201,20 @@ void gate_controller( void* pvParameters ){
         // Wait for the gate to fully extend down
         vTaskDelay(2000/portTICK_PERIOD_MS);
 
-        // Send the corresponding IR command
-        xTaskNotifyGiveIndexed(ir_taskHandler, 0);
-
         // Reset and Put the peripheral back to sleep
         ESP_ERROR_CHECK( ledc_set_duty(PWM_GATE_SPEED_MODE, PWM_GATE_CHANNEL, 0) ); // Reset the PWM 
         ESP_ERROR_CHECK( ledc_update_duty(PWM_GATE_SPEED_MODE, PWM_GATE_CHANNEL) ); // Apply the new PWM
         ESP_ERROR_CHECK( ledc_stop(PWM_GATE_SPEED_MODE, PWM_GATE_CHANNEL, 0) );
+        
+        // Send the corresponding IR command
+        // xTaskNotifyGiveIndexed(ir_taskHandler, 0);
+
+        // Enable the pin interrupt
+        gpio_intr_enable(PWM_GATE_GPIO_NUM_REC);
 
 
         // -- [BLOCKING] Wait for the trigger to ensure the payload is inside --
-        ulTaskNotifyTakeIndexed(1, 0, portMAX_DELAY);
+        ulTaskNotifyTakeIndexed(1, pdTRUE, portMAX_DELAY);
         //vTaskDelay(2000/portTICK_PERIOD_MS); // TO BE DELETED
 
 
@@ -214,11 +236,19 @@ void gate_controller( void* pvParameters ){
 }
 
 void uart_receiver( void* pvParameters ){
+    /*
+        [INFO] Notification Indexes
+        Index 0 source - uart_sender, whenever the request is sent  
+    */
     uint8_t bufferRX[256];
     mavlink_message_t msg;
     mavlink_status_t status;
 
     while( true ) {
+        // -- [BLOCKING] Wait for the notification --
+        ulTaskNotifyTakeIndexed(0, pdTRUE, portMAX_DELAY);
+
+        // -- Main logic --
         int len = uart_read_bytes(UART_PORT_NUM, bufferRX, sizeof(bufferRX), pdMS_TO_TICKS(20));
         // ESP_LOGI(printerTask, "Length of data received from UART: %d bytes", len);
         if (len > 0) {
@@ -244,15 +274,16 @@ void uart_sender( void* pvParameters ){
     
     // Pack the message to get the final MavLink data pocket to be transmitted over UART
     uint16_t mavlinkData_len = mavlink_msg_to_send_buffer(bufferTX, &msg);
-    ESP_LOGI( printerTask, "Mavlink data has %d length", mavlinkData_len );
     
     while( true ){ 
         // Write data to UART.
         uart_write_bytes(UART_PORT_NUM, bufferTX, mavlinkData_len);
+        ESP_LOGI( printerTask, "Requesting data from mavlink..." );
 
-        ESP_LOGI( printerTask, "Getting data from uart..." ); 
-
-        // Wait for the response to come in
+        // Allow the read 
+        xTaskNotifyGiveIndexed(uart_receiver_taskHandler, 0);
+        
+        // Stay idle for a bit to decrease the comp.cost
         vTaskDelay(500/portTICK_PERIOD_MS);
     }
     /* End of debugging ------------------------------------------------------------------------- */
@@ -272,8 +303,8 @@ void app_main(void) {
     
     // GPIO config
     gpio_config_t pwm_gate_gpio_config = {0};
-    pwm_gate_gpio_config.pin_bit_mask = PWM_GATE_GPIO_NUM_REC;
-    pwm_gate_gpio_config.mode = GPIO_MODE_OUTPUT;
+    pwm_gate_gpio_config.pin_bit_mask = 1ULL << PWM_GATE_GPIO_NUM_REC;
+    pwm_gate_gpio_config.mode = GPIO_MODE_INPUT;
     pwm_gate_gpio_config.pull_up_en = GPIO_PULLUP_DISABLE;
     pwm_gate_gpio_config.pull_down_en = GPIO_PULLDOWN_ENABLE;
     pwm_gate_gpio_config.intr_type = GPIO_INTR_HIGH_LEVEL;
@@ -282,6 +313,9 @@ void app_main(void) {
     // Configure ISR
     ESP_ERROR_CHECK( gpio_install_isr_service(0) );
     ESP_ERROR_CHECK( gpio_isr_handler_add(PWM_GATE_GPIO_NUM_REC, pwm_gate_rec_handler, NULL) );
+
+    // Stop interrupts from this pin until the gate is lowered 
+    gpio_intr_disable(PWM_GATE_GPIO_NUM_REC);
 
     // -- UART init begin --
     // Setup UART buffered IO with event queue
@@ -330,7 +364,7 @@ void app_main(void) {
 
 
     // A task for managing the IR
-    status = xTaskCreatePinnedToCore(
+    /* status = xTaskCreatePinnedToCore(
         ir_controller, // function
         "IR_CONTROLLER", // name
         4096, // stack size in bytes
@@ -342,7 +376,7 @@ void app_main(void) {
     
     if(status != pdPASS){
         ESP_LOGE( printerTask, "Failed to create the UART_SENDER task" );
-    }
+    } */
 
 
     // A task for reseiving data over UART(using Mavlink2 as the payload format)
