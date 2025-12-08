@@ -19,7 +19,8 @@
 #include "driver/rmt_tx.h"
 #include <c_library_v2/common/mavlink.h>
 
-// Macros
+
+// -- Macros --
 #define UART_TX_PIN_NUM 43 // D6 on XIAO = TX
 #define UART_RX_PIN_NUM 44 // D7 on XIAO = RX
 #define UART_RTS_PIN_NUM 8 
@@ -29,8 +30,9 @@
 #define MAVLINK_SYSTEM_ID 2
 #define MAVLINK_COMPONENT_ID MAV_COMP_ID_ONBOARD_COMPUTER 
 
-#define ALT_AIRBORNE_THRESHOLD 5000
-#define ALT_GATE_THRESHOLD 2000
+// ALT_GATE_THRESHOLD is always < ALT_AIRBORNE_THRESHOLD
+#define ALT_AIRBORNE_THRESHOLD 800
+#define ALT_GATE_THRESHOLD -100 
 
 #define PWM_GATE_GPIO_NUM_SIG   5 // Sends the PWM signal, D4
 #define PWM_GATE_GPIO_NUM_REC   6 // Gets triggered when the payload is inside the pick-up mechanism, D5
@@ -41,6 +43,30 @@
 
 #define RMT_GPIO_NUM    1 // TODO: figure out if D3 is suitable, and what is its GPIO number
 
+
+// -- States and state functions ( To be modified only with Mutexes/Spinlocks ) --
+typedef enum {
+    STATE_AIRBORNE,
+    STATE_LOW_ALT,
+    STATE_LANDED
+} states_t;
+states_t state = STATE_LOW_ALT;
+
+static portMUX_TYPE state_spinlock = portMUX_INITIALIZER_UNLOCKED;
+static states_t check_state(){
+    return state;
+}
+
+static void update_state_to(states_t new_state){
+    taskENTER_CRITICAL(&state_spinlock);
+
+    // [CRITICAL SECTION]
+    state = new_state;
+
+    taskEXIT_CRITICAL(&state_spinlock);
+}
+
+
 // --- Task handlers ---
 static TaskHandle_t uart_sender_taskHandler = NULL;
 static TaskHandle_t uart_receiver_taskHandler = NULL;
@@ -48,8 +74,9 @@ static TaskHandle_t gate_taskHandler = NULL;
 static TaskHandle_t ir_taskHandler = NULL;
 static const char* printerTask = "printer"; // TO BE DELETED AFTER DEBUGGING: used to print out msgs to the terminal
 
-// --- ISR ---
-static void IRAM_ATTR pwm_gate_rec_handler(void* arg){
+
+// --- ISRs ---
+static void IRAM_ATTR gate_rec_handler(void* arg){
     // Notify the pick-up mechanism(gate) that it start rising now
     vTaskGenericNotifyGiveFromISR(gate_taskHandler, 1, NULL);
 
@@ -57,55 +84,110 @@ static void IRAM_ATTR pwm_gate_rec_handler(void* arg){
     gpio_intr_disable(PWM_GATE_GPIO_NUM_REC);
 }
 
+
 // --- Helper functions ---
 static void handle_mavlink_msg( mavlink_message_t* msg ){
     
     switch( msg->msgid ){
         case MAVLINK_MSG_ID_GLOBAL_POSITION_INT:
         {
-                /* // To be utilied if more info is needed: 
-                    // Declare and reset the global position data holder
-                    mavlink_global_position_int_t glob_pos_int_holder = {0};
-                    
-                    // Get all fields in payload (into global_position)
-                    // TODO: change logic to getting a single field
-                    mavlink_msg_global_position_int_decode(msg, &glob_pos_int_holder);
-                */
+            /* 
+            // To be utilized if more info is needed: 
+            // Declare and reset the global position data holder
+            mavlink_global_position_int_t glob_pos_int_holder = {0};
+            
+            // Get all fields in payload (into global_position)
+            // TODO: change logic to getting a single field
+            mavlink_msg_global_position_int_decode(msg, &glob_pos_int_holder);
+            */
+            
+            // Get altitude
+            int32_t rel_alt = mavlink_msg_global_position_int_get_relative_alt(msg);
+            // Print the data
+            ESP_LOGI( printerTask, "[DATA] Relative altitude: %ld", rel_alt);
+            
+            // State logic
+            state = check_state();
+            
+            switch(state){
+                case STATE_AIRBORNE: {
+                    // Above ALT_AIRBORNE_THRESHOLD
+                    // Drone is airborne and has reached a significant altitude 
 
-                int32_t rel_alt = mavlink_msg_global_position_int_get_relative_alt(msg);
+                    // Check if landed
+                    if( rel_alt < ALT_GATE_THRESHOLD ){
+                        ESP_LOGI(printerTask, "[!STATE CHANGE!] STATE_AIRBORNE->STATE_LANDED");
 
-                /*
-                    When the ALT_AIRBORNE_THRESHOLD is reached, change the value of the shared resource
-                    to represent AIRBORNE state machine and allow checking the gate threshold.
-                    As soon as the payload is picked up, reset the state machine to Stationary and wait 
-                    for the ALT_AIRBORNE_THRESHOLD again before allowing to check on the gate threshold
-                */
+                        // Change the state to STATE_LANDED
+                        update_state_to(STATE_LANDED);
 
-
-                if( rel_alt < ALT_GATE_THRESHOLD ){
-                    // Notify the gate controller to lower the gate
-                    xTaskNotifyGiveIndexed(gate_taskHandler, 0);
+                        // Notify the gate controller to lower the gate
+                        xTaskNotifyGiveIndexed(gate_taskHandler, 0);
+                    }
                 }
+                break;
 
-                // Print the resulting data
-                ESP_LOGI( printerTask, "[DATA] Relative altitude: %ld", rel_alt);
+                case STATE_LOW_ALT: {
+                    // Below ALT_AIRBORNE_THRESHOLD
+                    // Drone has recently or is about to take off
+
+                    // Check if above certain altitude (ALT_AIRBORNE_THRESHOLD)
+                    if( rel_alt > ALT_AIRBORNE_THRESHOLD ){
+                        ESP_LOGI(printerTask, "[!STATE CHANGE!] STATE_LOW_ALT->STATE_AIRBORNE");
+
+                        // Change the state to STATE_AIRBORNE
+                        update_state_to(STATE_AIRBORNE);
+                    }
+
+                }
+                break;
+
+                case STATE_LANDED: {
+                    // Below ALT_GATE_THRESHOLD(which is < ALT_AIRBORNE_THRESHOLD)
+                    // Drone has landed and will pick-up the payload
+
+                    /*
+                        !Notice, the altitude request logic is disabled in this state
+                        
+                        This state is updated to STATE_LOW_ALT in the gate_controller 
+                        along with the semaphore update that allows UART_sender to 
+                        continue sending altitude requests.
+
+                        Enabling UART_sender signifies: drone is about to take off
+                    */
+
+                    // Exit the function early
+                    return;
+                }
+                break;
+
+                default: {}
+                break;
             }
-            break;
+
+
+        }
+        break;
+            
         /*
         case MAVLINK_MSG_ID_HEARTBEAT:
-            {
-                ESP_LOGI(printerTask, "Heart beat received.");
-            }
-            break;
+        {
+            ESP_LOGI(printerTask, "Heart beat received.");
+        }
+        break;
         */
         
         default:
-            {
-                // ESP_LOGI(printerTask, "[WARNING] Incorrect msgid: %d", msg->msgid);
-            }
-            break;
+        {
+            // ESP_LOGI(printerTask, "[WARNING] Incorrect msgid: %d", msg->msgid);
+        }
+        break;
     }
+
+    // Allow UART_sender to send another request                        
+    xTaskNotifyGiveIndexed(uart_sender_taskHandler, 0);
 }
+
 
 // --- Task definitions ---
 void ir_controller( void* pvParameters ){
@@ -128,7 +210,6 @@ void ir_controller( void* pvParameters ){
     };
     ESP_ERROR_CHECK(rmt_new_tx_channel(&tx_chan_config, &tx_chan));
 
-    //
 
     // -- Main logic --
     while( true ){
@@ -142,11 +223,12 @@ void ir_controller( void* pvParameters ){
     }
 }
 
+
 void gate_controller( void* pvParameters ){
     /*
         [INFO] Notification Indexes
         Index 0 source - handle_mavlink_msg, whenever the drone has landed
-        Index 1 source - pwm_gate_rec_handler, ISR triggered by the payload
+        Index 1 source - gate_rec_handler, ISR triggered by the payload
     */
 
     // --- Init the gate controller ---
@@ -196,7 +278,6 @@ void gate_controller( void* pvParameters ){
         // Send the corresponding Servo command
         ESP_ERROR_CHECK( ledc_set_duty(PWM_GATE_SPEED_MODE, PWM_GATE_CHANNEL, duty_2ms) ); // Set the new PWM with 2000microsec high signal
         ESP_ERROR_CHECK( ledc_update_duty(PWM_GATE_SPEED_MODE, PWM_GATE_CHANNEL) ); // Apply the new PWM
-        ESP_LOGI( printerTask, "!!!! 2000" );
 
         // Wait for the gate to fully extend down
         vTaskDelay(2000/portTICK_PERIOD_MS);
@@ -221,7 +302,6 @@ void gate_controller( void* pvParameters ){
         // -- Raise the gate --
         // Wake up the PWM peripheral &
         // Send the corresponding Servo command
-        ESP_LOGI( printerTask, "!!!! 1000" );
         ESP_ERROR_CHECK( ledc_set_duty(PWM_GATE_SPEED_MODE, PWM_GATE_CHANNEL, duty_1ms) ); // Set the new PWM with 1000microsec high signal
         ESP_ERROR_CHECK( ledc_update_duty(PWM_GATE_SPEED_MODE, PWM_GATE_CHANNEL) ); // Apply the new PWM
 
@@ -232,8 +312,15 @@ void gate_controller( void* pvParameters ){
         ESP_ERROR_CHECK( ledc_set_duty(PWM_GATE_SPEED_MODE, PWM_GATE_CHANNEL, 0) ); // Reset the PWM 
         ESP_ERROR_CHECK( ledc_update_duty(PWM_GATE_SPEED_MODE, PWM_GATE_CHANNEL) ); // Apply the new PWM
         ESP_ERROR_CHECK( ledc_stop(PWM_GATE_SPEED_MODE, PWM_GATE_CHANNEL, 0) );
+
+        // Change the state to STATE_LOW_ALT
+        update_state_to(STATE_LOW_ALT);
+        
+        // Allow UART_sender to send another request                        
+        xTaskNotifyGiveIndexed(uart_sender_taskHandler, 0);
     }
 }
+
 
 void uart_receiver( void* pvParameters ){
     /*
@@ -264,6 +351,14 @@ void uart_receiver( void* pvParameters ){
 
 
 void uart_sender( void* pvParameters ){
+    /*
+        [INFO] - UART gets enabled on boot via app_main,
+        is disabled when the state = STATE_LANDED via handle_mavlink_msg,
+        is re-enabled when during the STATE_LANDED->STATE_LOW_ALT transition via the gate_controller.
+
+        Notification index 0 sources: app_main, gate_controller, handle_mavlink_msg.
+    */
+
     /* Debugging, to be converted into ISR-based approach ----------------------------------------*/
     uint8_t bufferTX[128];
     
@@ -276,6 +371,9 @@ void uart_sender( void* pvParameters ){
     uint16_t mavlinkData_len = mavlink_msg_to_send_buffer(bufferTX, &msg);
     
     while( true ){ 
+        // [BLOCKING] - Wait until you're allowed to send an altitude request
+        ulTaskNotifyTakeIndexed(0, pdTRUE, portMAX_DELAY);
+
         // Write data to UART.
         uart_write_bytes(UART_PORT_NUM, bufferTX, mavlinkData_len);
         ESP_LOGI( printerTask, "Requesting data from mavlink..." );
@@ -283,7 +381,7 @@ void uart_sender( void* pvParameters ){
         // Allow the read 
         xTaskNotifyGiveIndexed(uart_receiver_taskHandler, 0);
         
-        // Stay idle for a bit to decrease the comp.cost
+        // Stay idle for a bit to decrease the computational cost
         vTaskDelay(500/portTICK_PERIOD_MS);
     }
     /* End of debugging ------------------------------------------------------------------------- */
@@ -294,7 +392,7 @@ void uart_sender( void* pvParameters ){
 
 
 // --- Main function ---
-// TODO: Implement log file for the error handling
+// TODO: In UART_sender, first ensure that there is a connection, then start the request/handle mavlink logic
 // TODO: Use multiple cores
 void app_main(void) {
 
@@ -312,7 +410,7 @@ void app_main(void) {
 
     // Configure ISR
     ESP_ERROR_CHECK( gpio_install_isr_service(0) );
-    ESP_ERROR_CHECK( gpio_isr_handler_add(PWM_GATE_GPIO_NUM_REC, pwm_gate_rec_handler, NULL) );
+    ESP_ERROR_CHECK( gpio_isr_handler_add(PWM_GATE_GPIO_NUM_REC, gate_rec_handler, NULL) );
 
     // Stop interrupts from this pin until the gate is lowered 
     gpio_intr_disable(PWM_GATE_GPIO_NUM_REC);
@@ -408,5 +506,8 @@ void app_main(void) {
     
     if(status != pdPASS){
         ESP_LOGE( printerTask, "Failed to create the UART_SENDER task" );
-    }  
+    }
+    
+    // Enable UART_sender(This is where the entire logic starts)
+    xTaskNotifyGiveIndexed(uart_sender_taskHandler, 0);
 }
