@@ -40,6 +40,7 @@
 #define PWM_GATE_TIMER_RES      LEDC_TIMER_12_BIT
 #define PWM_GATE_SPEED_MODE     LEDC_LOW_SPEED_MODE
 #define PWM_GATE_CHANNEL        LEDC_CHANNEL_0
+#define PWM_GATE_ACTIVE_TIME    500 // ms
 
 #define RMT_GPIO_NUM    1 // TODO: figure out if D3 is suitable, and what is its GPIO number
 
@@ -54,6 +55,17 @@ states_t state = STATE_LOW_ALT;
 
 static portMUX_TYPE state_spinlock = portMUX_INITIALIZER_UNLOCKED;
 static states_t check_state(){
+    // Create a holder for local, thread-safe copy
+    states_t temp_s;
+
+    taskENTER_CRITICAL(&state_spinlock);
+
+    // [CRITICAL SECTION]
+    temp_s = state;
+
+    taskEXIT_CRITICAL(&state_spinlock);
+
+    // Return the local copy
     return state;
 }
 
@@ -78,7 +90,7 @@ static const char* printerTask = "printer"; // TO BE DELETED AFTER DEBUGGING: us
 // --- ISRs ---
 static void IRAM_ATTR gate_rec_handler(void* arg){
     // Notify the pick-up mechanism(gate) that it start rising now
-    vTaskGenericNotifyGiveFromISR(gate_taskHandler, 1, NULL);
+    vTaskNotifyGiveIndexedFromISR(gate_taskHandler, 1, pdFALSE);
 
     // Stop more interrupts from this pin until the gate is lowered again
     gpio_intr_disable(PWM_GATE_GPIO_NUM_REC);
@@ -280,7 +292,7 @@ void gate_controller( void* pvParameters ){
         ESP_ERROR_CHECK( ledc_update_duty(PWM_GATE_SPEED_MODE, PWM_GATE_CHANNEL) ); // Apply the new PWM
 
         // Wait for the gate to fully extend down
-        vTaskDelay(2000/portTICK_PERIOD_MS);
+        vTaskDelay(PWM_GATE_ACTIVE_TIME/portTICK_PERIOD_MS);
 
         // Reset and Put the peripheral back to sleep
         ESP_ERROR_CHECK( ledc_set_duty(PWM_GATE_SPEED_MODE, PWM_GATE_CHANNEL, 0) ); // Reset the PWM 
@@ -296,7 +308,7 @@ void gate_controller( void* pvParameters ){
 
         // -- [BLOCKING] Wait for the trigger to ensure the payload is inside --
         ulTaskNotifyTakeIndexed(1, pdTRUE, portMAX_DELAY);
-        //vTaskDelay(2000/portTICK_PERIOD_MS); // TO BE DELETED
+        //vTaskDelay(PWM_GATE_ACTIVE_TIME/portTICK_PERIOD_MS); // TO BE DELETED
 
 
         // -- Raise the gate --
@@ -306,7 +318,7 @@ void gate_controller( void* pvParameters ){
         ESP_ERROR_CHECK( ledc_update_duty(PWM_GATE_SPEED_MODE, PWM_GATE_CHANNEL) ); // Apply the new PWM
 
         // Wait for the gate to fully retract itself
-        vTaskDelay(2000/portTICK_PERIOD_MS); 
+        vTaskDelay(PWM_GATE_ACTIVE_TIME/portTICK_PERIOD_MS); 
 
         // Reset and Put the peripheral back to sleep 
         ESP_ERROR_CHECK( ledc_set_duty(PWM_GATE_SPEED_MODE, PWM_GATE_CHANNEL, 0) ); // Reset the PWM 
@@ -315,6 +327,7 @@ void gate_controller( void* pvParameters ){
 
         // Change the state to STATE_LOW_ALT
         update_state_to(STATE_LOW_ALT);
+        ESP_LOGI(printerTask, "[!STATE CHANGE!]STATE_LANDED->STATE_LOW_ALT");
         
         // Allow UART_sender to send another request                        
         xTaskNotifyGiveIndexed(uart_sender_taskHandler, 0);
