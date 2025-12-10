@@ -21,18 +21,22 @@
 
 
 // -- Macros --
+#define FALSE   0
+#define TRUE    1
+
 #define UART_TX_PIN_NUM 43 // D6 on XIAO = TX
 #define UART_RX_PIN_NUM 44 // D7 on XIAO = RX
 #define UART_RTS_PIN_NUM 8 
 #define UART_CTS_PIN_NUM 9
 #define UART_PORT_NUM UART_NUM_2
+#define UART_DELAY_TIME  500 // ms
 
 #define MAVLINK_SYSTEM_ID 2
 #define MAVLINK_COMPONENT_ID MAV_COMP_ID_ONBOARD_COMPUTER 
 
 // ALT_GATE_THRESHOLD is always < ALT_AIRBORNE_THRESHOLD
-#define ALT_AIRBORNE_THRESHOLD 800
-#define ALT_GATE_THRESHOLD -100 
+#define ALT_AIRBORNE_THRESHOLD -2500
+#define ALT_GATE_THRESHOLD -3500 
 
 #define PWM_GATE_GPIO_NUM_SIG   5 // Sends the PWM signal, D4
 #define PWM_GATE_GPIO_NUM_REC   6 // Gets triggered when the payload is inside the pick-up mechanism, D5
@@ -135,6 +139,9 @@ static void handle_mavlink_msg( mavlink_message_t* msg ){
 
                         // Notify the gate controller to lower the gate
                         xTaskNotifyGiveIndexed(gate_taskHandler, 0);
+
+                        // Exit the function early
+                        return;
                     }
                 }
                 break;
@@ -159,7 +166,7 @@ static void handle_mavlink_msg( mavlink_message_t* msg ){
                     // Drone has landed and will pick-up the payload
 
                     /*
-                        !Notice, the altitude request logic is disabled in this state
+                        !Notice, the altitude request logic(uart_sender) is disabled in this state
                         
                         This state is updated to STATE_LOW_ALT in the gate_controller 
                         along with the semaphore update that allows UART_sender to 
@@ -196,7 +203,9 @@ static void handle_mavlink_msg( mavlink_message_t* msg ){
         break;
     }
 
-    // Allow UART_sender to send another request                        
+    // Allow UART_sender to send another request
+    // TODO: check if it is safe to me the notification to STATE_LOW_ALT only
+    // [NOTE] not reachable in STATE_LANDED and STATE_AIRBORNE states                        
     xTaskNotifyGiveIndexed(uart_sender_taskHandler, 0);
 }
 
@@ -343,21 +352,34 @@ void uart_receiver( void* pvParameters ){
     uint8_t bufferRX[256];
     mavlink_message_t msg;
     mavlink_status_t status;
+    uint8_t another_request_needed = TRUE;
 
     while( true ) {
+        // Reset the check
+        another_request_needed = TRUE;
+
         // -- [BLOCKING] Wait for the notification --
         ulTaskNotifyTakeIndexed(0, pdTRUE, portMAX_DELAY);
 
         // -- Main logic --
-        int len = uart_read_bytes(UART_PORT_NUM, bufferRX, sizeof(bufferRX), pdMS_TO_TICKS(20));
+        int len = uart_read_bytes(UART_PORT_NUM, bufferRX, sizeof(bufferRX), UART_DELAY_TIME/portTICK_PERIOD_MS);
         // ESP_LOGI(printerTask, "Length of data received from UART: %d bytes", len);
         if (len > 0) {
             for (int i = 0; i < len; i++) {
                 if (mavlink_parse_char(MAVLINK_COMM_0, bufferRX[i], &msg, &status)) {
                     // Got one complete MAVLink message
                     handle_mavlink_msg(&msg);
+
+                    // Some information was received, handle_mavlink_msg will trigger next request
+                    another_request_needed = FALSE;
                 }
             }
+        }
+
+        // At this point, length == 0 OR the received message is not MAVlink-like.
+        if( another_request_needed ){
+            // Trigger another altitude request
+            xTaskNotifyGiveIndexed(uart_sender_taskHandler, 0);
         }
     }
 }
@@ -366,10 +388,11 @@ void uart_receiver( void* pvParameters ){
 void uart_sender( void* pvParameters ){
     /*
         [INFO] - UART gets enabled on boot via app_main,
+        is re-enabled when no message or not MAVlink-like message is received via uart_receiver,
         is disabled when the state = STATE_LANDED via handle_mavlink_msg,
         is re-enabled when during the STATE_LANDED->STATE_LOW_ALT transition via the gate_controller.
 
-        Notification index 0 sources: app_main, gate_controller, handle_mavlink_msg.
+        Notification index 0 sources: app_main uart_receiver, gate_controller, handle_mavlink_msg.
     */
 
     /* Debugging, to be converted into ISR-based approach ----------------------------------------*/
@@ -386,6 +409,9 @@ void uart_sender( void* pvParameters ){
     while( true ){ 
         // [BLOCKING] - Wait until you're allowed to send an altitude request
         ulTaskNotifyTakeIndexed(0, pdTRUE, portMAX_DELAY);
+       
+        // Flush the RX buffer to get the latest data
+        uart_flush_input(UART_PORT_NUM);
 
         // Write data to UART.
         uart_write_bytes(UART_PORT_NUM, bufferTX, mavlinkData_len);
@@ -395,7 +421,7 @@ void uart_sender( void* pvParameters ){
         xTaskNotifyGiveIndexed(uart_receiver_taskHandler, 0);
         
         // Stay idle for a bit to decrease the computational cost
-        vTaskDelay(500/portTICK_PERIOD_MS);
+        vTaskDelay(UART_DELAY_TIME/portTICK_PERIOD_MS);
     }
     /* End of debugging ------------------------------------------------------------------------- */
 
