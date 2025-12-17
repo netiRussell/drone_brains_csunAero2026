@@ -1,5 +1,5 @@
 idf_component_register(
-                        SRCS "drone_brains_csunAero2026.c"
+                        SRCS "drone_brains_csunAero2026.c" "nec_ir/ir_nec_encoder.c"
                         INCLUDE_DIRS "."
                         REQUIRES esp_driver_uart mavlink esp_driver_ledc esp_driver_gpio esp_driver_rmt 
                     )

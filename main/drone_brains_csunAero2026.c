@@ -17,6 +17,7 @@
 #include "driver/gpio.h"
 #include "driver/ledc.h"
 #include "driver/rmt_tx.h"
+#include "nec_ir/ir_nec_encoder.h"
 #include <c_library_v2/common/mavlink.h>
 
 
@@ -46,8 +47,11 @@
 #define PWM_GATE_CHANNEL        LEDC_CHANNEL_0
 #define PWM_GATE_ACTIVE_TIME    500 // ms
 
-#define RMT_GPIO_NUM    1 // TODO: figure out if D3 is suitable, and what is its GPIO number
+#define RMT_GPIO_NUM        4 // Sends the IR signal, D3
+#define IR_RESOLUTION_HZ    1000000 // 1Mhz, Period = 1micro sec.
 
+// -- Structs --
+ir_nec_scan_code_t ir_nec_data = {0};
 
 // -- States and state functions ( To be modified only with Mutexes/Spinlocks ) --
 typedef enum {
@@ -98,6 +102,13 @@ static void IRAM_ATTR gate_rec_handler(void* arg){
 
     // Stop more interrupts from this pin until the gate is lowered again
     gpio_intr_disable(PWM_GATE_GPIO_NUM_REC);
+}
+
+static bool IRAM_ATTR ir_trans_done_callback(rmt_channel_handle_t tx_chan, const rmt_tx_done_event_data_t *edata, void *user_ctx){
+    // Notify the IR task that it has finished current NEC transmission.
+    vTaskNotifyGiveIndexedFromISR(ir_taskHandler, 0, pdFALSE);
+
+    return pdFALSE;
 }
 
 
@@ -213,8 +224,11 @@ static void handle_mavlink_msg( mavlink_message_t* msg ){
 // --- Task definitions ---
 void ir_controller( void* pvParameters ){
     /*
+        [INFO] This task waits on a queue that passes pointer to the struct with NEC address and command
+        Queue source: gate_controller, when the drone has landed and now it executed the drop-off and pick-up procedures
+
         [INFO] Notification Indexes
-        Index 0 source - gate_controller, whenever the gate is lowered 
+        Index 0 source - , ISR callback that is triggered when a transmission is done
     */
 
     // -- Init --
@@ -224,22 +238,59 @@ void ir_controller( void* pvParameters ){
         .clk_src = RMT_CLK_SRC_DEFAULT,   // select source clock
         .gpio_num = RMT_GPIO_NUM,         // GPIO number
         .mem_block_symbols = 64,          // memory block size, 64 * 4 = 256 Bytes
-        .resolution_hz = 1 * 1000 * 1000, // 1 MHz tick resolution, i.e., 1 tick = 1 µs
+        .resolution_hz = IR_RESOLUTION_HZ, // 1 MHz tick resolution, i.e., 1 tick = 1 µs
         .trans_queue_depth = 4,           // set the number of transactions that can pend in the background
-        .flags.invert_out = false,        // do not invert output signal
         .flags.with_dma = false,          // do not need DMA backend
     };
-    ESP_ERROR_CHECK(rmt_new_tx_channel(&tx_chan_config, &tx_chan));
+    ESP_ERROR_CHECK( rmt_new_tx_channel(&tx_chan_config, &tx_chan) );
 
+    // Carrier config init
+    rmt_carrier_config_t carrier_cfg = {
+        .duty_cycle = 0.33,
+        .frequency_hz = 38000, // 38KHz
+    };
+    ESP_ERROR_CHECK(rmt_apply_carrier(tx_chan, &carrier_cfg));
+
+    rmt_transmit_config_t rmt_transmit_config = {
+        .loop_count = 0, // no loop
+    };
+
+    // RMT encoder init (mechanism that turns raw data into NEC RMT symbols)
+    ir_nec_encoder_config_t nec_encoder_cfg = {
+        .resolution = IR_RESOLUTION_HZ,
+    };
+    rmt_encoder_handle_t nec_encoder = NULL;
+    ESP_ERROR_CHECK(rmt_new_ir_nec_encoder(&nec_encoder_cfg, &nec_encoder));
+
+    // Register a callback for RMT disabling
+    rmt_tx_event_callbacks_t rmt_tx_event_callback = {
+        .on_trans_done = ir_trans_done_callback,
+    };
+    rmt_tx_register_event_callbacks(tx_chan, &rmt_tx_event_callback, NULL);
 
     // -- Main logic --
     while( true ){
-        // -- [BLOCKING] Wait for the notification --
-        ulTaskNotifyTakeIndexed(0, pdTRUE, portMAX_DELAY);
+        // [BLOCKING] Wait for the Queue to get filled with IR payload data
+        // TODO: implement the Queue logic
         ESP_LOGI(printerTask, "IR has been triggered");
+        
+        // [DEBUG ONLY] Adjust the command and address
+        ir_nec_data.address = 0x08;
+        ir_nec_data.command = 0x25; 
+        
+        // Enable the RMT peripheral
+        ESP_ERROR_CHECK( rmt_enable(tx_chan) );
+        
+        // Send current signal
+        ESP_ERROR_CHECK( rmt_transmit(tx_chan, nec_encoder, &ir_nec_data, sizeof(ir_nec_data), &rmt_transmit_config) );
+        
+        // [BLOCKING] Wait until the IR transmission is done
+        ulTaskNotifyTakeIndexed(0, pdTRUE, portMAX_DELAY);
+
+        // Disable the RMT peripheral to save energy
+        ESP_ERROR_CHECK( rmt_disable(tx_chan) );
 
         // While the payload hasn't arrivied, keep sending the NEC signal
-        // TODO: implement shared with gate_controller resource
         vTaskDelay(1000/portTICK_PERIOD_MS);
     }
 }
@@ -309,6 +360,7 @@ void gate_controller( void* pvParameters ){
         ESP_ERROR_CHECK( ledc_stop(PWM_GATE_SPEED_MODE, PWM_GATE_CHANNEL, 0) );
         
         // Send the corresponding IR command
+        // TODO: implement as queue so that the command is passed along the signaling.
         // xTaskNotifyGiveIndexed(ir_taskHandler, 0);
 
         // Enable the pin interrupt
@@ -434,6 +486,7 @@ void uart_sender( void* pvParameters ){
 // TODO: In UART_sender, first ensure that there is a connection, then start the request/handle mavlink logic
 // TODO: Use multiple cores
 void app_main(void) {
+    /*
 
     // -- ISR based, GPIO init --
     // The GPIO will wait for the payload to close an open circuit to trigger the raise of the pick-up mechanism
@@ -496,12 +549,14 @@ void app_main(void) {
     );
     
     if(status != pdPASS){
-        ESP_LOGE( printerTask, "Failed to create the UART_SENDER task" );
+        ESP_LOGE( printerTask, "Failed to create the GATE_CONTROLLER task" );
     }
+
+    */
 
 
     // A task for managing the IR
-    /* status = xTaskCreatePinnedToCore(
+    BaseType_t status = xTaskCreatePinnedToCore(
         ir_controller, // function
         "IR_CONTROLLER", // name
         4096, // stack size in bytes
@@ -512,10 +567,10 @@ void app_main(void) {
     );
     
     if(status != pdPASS){
-        ESP_LOGE( printerTask, "Failed to create the UART_SENDER task" );
-    } */
+        ESP_LOGE( printerTask, "Failed to create the IR_CONTROLLER task" );
+    }
 
-
+    /*
     // A task for reseiving data over UART(using Mavlink2 as the payload format)
     status = xTaskCreatePinnedToCore(
         uart_receiver, // function
@@ -549,4 +604,5 @@ void app_main(void) {
     
     // Enable UART_sender(This is where the entire logic starts)
     xTaskNotifyGiveIndexed(uart_sender_taskHandler, 0);
+    */
 }
