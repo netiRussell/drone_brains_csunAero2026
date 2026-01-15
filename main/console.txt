@@ -1,0 +1,40 @@
+I (73347) printer: [DATA] Relative altitude: -2619
+I (73797) printer: Requesting data from mavlink...
+I (73847) printer: [DATA] Relative altitude: -3046
+I (73847) printer: [!STATE CHANGE!] STATE_AIRBORNE->STATE_LANDED
+I (73847) printer: Gate controller has been triggered... duty = 409
+I (73857) printer: [DATA] Relative altitude: -3046
+I (74297) printer: Requesting data from mavlink...
+I (74347) printer: [DATA] Relative altitude: -2984
+I (74347) printer: [DATA] Relative altitude: -2984
+I (74357) printer: IR has been triggered
+I (74797) printer: Requesting data from mavlink...
+I (74847) printer: [DATA] Relative altitude: -2961
+I (74847) printer: [DATA] Relative altitude: -2960
+I (75297) printer: Requesting data from mavlink...
+I (75347) printer: [DATA] Relative altitude: -3075
+I (75347) printer: [DATA] Relative altitude: -3075
+I (75797) printer: Requesting data from mavlink...
+I (75847) printer: [DATA] Relative altitude: -3078
+I (75847) printer: [DATA] Relative altitude: -3078
+I (76297) printer: Requesting data from mavlink...
+I (76347) printer: [DATA] Relative altitude: -3111
+I (76347) printer: [DATA] Relative altitude: -3111
+I (76797) printer: Requesting data from mavlink...
+I (76847) printer: [DATA] Relative altitude: -3190
+I (76847) printer: [DATA] Relative altitude: -3190
+I (77297) printer: Requesting data from mavlink...
+I (77347) printer: [DATA] Relative altitude: -3125
+I (77347) printer: [DATA] Relative altitude: -3125
+I (77357) printer: IR has been triggered
+I (77457) printer: PWM GATE Interrupt has been enabled
+I (77797) printer: Requesting data from mavlink...
+I (77847) printer: [DATA] Relative altitude: -3231
+I (77847) printer: [DATA] Relative altitude: -3231
+I (78297) printer: Requesting data from mavlink...
+I (78347) printer: [DATA] Relative altitude: -3328
+I (78347) printer: [DATA] Relative altitude: -3328
+I (78797) printer: Requesting data from mavlink...
+I (78847) printer: [DATA] Relative altitude: -2928
+I (78847) printer: [DATA] Relative altitude: -2928
+I (79297) printer: Requesting data from mavlink...
