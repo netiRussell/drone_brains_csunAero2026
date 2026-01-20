@@ -36,8 +36,8 @@
 #define MAVLINK_COMPONENT_ID MAV_COMP_ID_ONBOARD_COMPUTER 
 
 // ALT_GATE_THRESHOLD is always < ALT_AIRBORNE_THRESHOLD
-#define ALT_AIRBORNE_THRESHOLD -2500
-#define ALT_GATE_THRESHOLD -3000 
+#define ALT_AIRBORNE_THRESHOLD -500
+#define ALT_GATE_THRESHOLD -1200 
 
 #define PWM_GATE_GPIO_NUM_SIG   5 // Sends the PWM signal, D4
 #define PWM_GATE_GPIO_NUM_REC   6 // Gets triggered when the payload is inside the pick-up mechanism, D5
@@ -45,22 +45,24 @@
 #define PWM_GATE_TIMER_RES      LEDC_TIMER_12_BIT
 #define PWM_GATE_SPEED_MODE     LEDC_LOW_SPEED_MODE
 #define PWM_GATE_CHANNEL        LEDC_CHANNEL_0
-#define PWM_GATE_ACTIVE_TIME    500 // ms
+#define PWM_GATE_ACTIVE_TIME    2000 // ms
 #define PWM_GATE_DELIVERY_WAIT  3000 // ms
 #define PWM_GATE_STOP_WAIT      1000 // ms
 #define PWM_GATE_QUEUE_WAIT     1000 // ms
 
 #define RMT_GPIO_NUM        4 // Sends the IR signal, D3
 #define IR_RESOLUTION_HZ    1000000 // 1Mhz, Period = 1micro sec.
-#define IR_STOP_RESEND_WAIT 1000 // ms
+#define IR_CAPTURE_RESEND_WAIT 1000 // ms
 
-#define PWM_GATE_REC_DEBUG_FLAG         0 // 1 = True, anything else = false 
-#define PWM_GATE_SIG_DEBUG_FLAG         0 // 1 = True, anything else = false
-#define IR_DEBUG_FLAG                   0 // 1 = True, anything else = false
-#define UART_DEBUG_FLAG                 0 // 1 = True, anything else = false
+#define PWM_GATE_REC_DEBUG_FLAG         0 // 1 = True, anything else = False 
+#define PWM_GATE_SIG_DEBUG_FLAG         0 // 1 = True, anything else = False
+#define IR_DEBUG_FLAG                   0 // 1 = True, anything else = False
+#define MAVLINK_DEBUG_FLAG              0 // 1 = True, anything else = False
+#define UART_DEBUG_FLAG                 1 // 1 = True, anything else = False
+#define GATE_IR_DEBUG_FLAG              0 // 1 = True, anything else = False
 
 // Global variable for debugging
-#if (IR_DEBUG_FLAG || PWM_GATE_REC_DEBUG_FLAG || PWM_GATE_REC_DEBUG_FLAG)
+#if (PWM_GATE_REC_DEBUG_FLAG)
     static int debug_only_counter = 0;
 #endif
 
@@ -122,7 +124,7 @@ static void IRAM_ATTR ir_rec_handler(void* arg){
     // Debugging feature. Make sure all the other tasks are commented out
     #if( PWM_GATE_REC_DEBUG_FLAG )
         debug_only_counter++;
-        return;
+        //return;
     #endif
 
     // - Main logic -
@@ -144,6 +146,13 @@ static void IRAM_ATTR ir_rec_handler(void* arg){
 static void handle_mavlink_msg( mavlink_message_t* msg ){
     // Get current state
     states_t current_state = check_state();
+
+    // Debugging feature
+    #if ( MAVLINK_DEBUG_FLAG )         
+        ESP_LOGI(printerTask, "Current state: %d", current_state);
+        ESP_LOGI(printerTask, "msgid=%u seq=%u sys=%u comp=%u\n",
+        msg->msgid, msg->seq, msg->sysid, msg->compid);
+    #endif
     
     switch( msg->msgid ){
         case MAVLINK_MSG_ID_GLOBAL_POSITION_INT:
@@ -162,13 +171,6 @@ static void handle_mavlink_msg( mavlink_message_t* msg ){
             int32_t rel_alt = mavlink_msg_global_position_int_get_relative_alt(msg);
             // Print the data
             ESP_LOGI( printerTask, "[DATA] Relative altitude: %ld", rel_alt);
-            
-            // Debugging feature
-            #if ( UART_DEBUG_FLAG )         
-                ESP_LOGI(printerTask, "Current state: %d", current_state);
-                ESP_LOGI(printerTask, "msgid=%u seq=%u sys=%u comp=%u\n",
-                msg->msgid, msg->seq, msg->sysid, msg->compid);
-            #endif
             
             switch(current_state){
                 case STATE_AIRBORNE: {
@@ -304,7 +306,9 @@ void ir_controller( void* pvParameters ){
     ir_nec_scan_code_t ir_nec_data = {0};
 
     // For debugging, comment out all tasks initializations in app_main except this one
-    if(IR_DEBUG_FLAG == 1){
+    #if (IR_DEBUG_FLAG)
+        ESP_LOGI(printerTask, "[WARNING] IR debug mode has been enabled");
+
         // Enable the RMT peripheral
         ESP_ERROR_CHECK( rmt_enable(tx_chan) );
         while( true ){
@@ -322,7 +326,7 @@ void ir_controller( void* pvParameters ){
 
             vTaskDelay( 1000 / portTICK_PERIOD_MS );
         }
-    }
+    #endif
 
     // -- Main logic --
     while( true ){
@@ -333,10 +337,8 @@ void ir_controller( void* pvParameters ){
         // Enable the RMT peripheral
         ESP_ERROR_CHECK( rmt_enable(tx_chan) );
         
-        // Send current signal
+        // [BLOCKING] Send current command and Wait until the IR transmission is done
         ESP_ERROR_CHECK( rmt_transmit(tx_chan, nec_encoder, &ir_nec_data, sizeof(ir_nec_data), &rmt_transmit_config) );
-        
-        // [BLOCKING] Wait until the IR transmission is done
         ulTaskNotifyTakeIndexed(0, pdTRUE, portMAX_DELAY);
 
         // In case command == Capture,
@@ -346,15 +348,15 @@ void ir_controller( void* pvParameters ){
             gpio_intr_enable(PWM_GATE_GPIO_NUM_REC);
             ESP_LOGI(printerTask, "PWM GATE Interrupt has been enabled");
 
-            // [BLOCKING] Waiting on the ISR to signal
-            //!!!!!!!!!!!!!!!!!!!!!! TODO: perhaps the ISR doesn't trigger anything !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
-            while( ulTaskNotifyTakeIndexed(1, pdTRUE, 0) == 0 ){
-                vTaskDelay(IR_STOP_RESEND_WAIT/portTICK_PERIOD_MS);
+            // [BLOCKING] Wait for the notification from the ISR triggered by the payload
+            // Re-transmistt the command if the notification take command times out
+            while( ulTaskNotifyTakeIndexed(1, pdTRUE, IR_CAPTURE_RESEND_WAIT/portTICK_PERIOD_MS) == 0 ){
+                // [BLOCKING] Send and wait until the IR transmission is done
                 ESP_ERROR_CHECK( rmt_transmit(tx_chan, nec_encoder, &ir_nec_data, sizeof(ir_nec_data), &rmt_transmit_config) );
-    
-                // [BLOCKING] Wait until the IR transmission is done
                 ulTaskNotifyTakeIndexed(0, pdTRUE, portMAX_DELAY);
-            }            
+                ESP_LOGI(printerTask, "The capture command is sent again");
+            }
+            ESP_LOGI(printerTask, "The notification from the payload was received");
         }
 
         // Clear the queue
@@ -414,6 +416,7 @@ void gate_controller( void* pvParameters ){
     while( TRUE ){
         // Debugging feature. Make sure all the other tasks are commented out
         #if( PWM_GATE_SIG_DEBUG_FLAG )
+            ESP_LOGI(printerTask, "[WARNING] PWM_GATE debug mode has been enabled");
             while ( TRUE ) {
                 // Wake up the PWM peripheral &
                 // Send the all Servo commands with 1sec delay in-between
@@ -436,6 +439,40 @@ void gate_controller( void* pvParameters ){
                 ESP_ERROR_CHECK( ledc_set_duty(PWM_GATE_SPEED_MODE, PWM_GATE_CHANNEL, duty_1ms) ); // Set the new PWM frequency
                 ESP_ERROR_CHECK( ledc_update_duty(PWM_GATE_SPEED_MODE, PWM_GATE_CHANNEL) ); // Apply the new PWM
                 vTaskDelay(2000 / portTICK_PERIOD_MS);
+            }
+        #endif
+
+        // Debugging feature. Make sure all the other tasks besides the IR_controller are commented out
+        #if( GATE_IR_DEBUG_FLAG )
+            ESP_LOGI(printerTask, "[WARNING] IR with PWM_GATE debug mode has been enabled");
+            while( TRUE ){
+                ESP_LOGI( printerTask, "\n\nNew cycle");
+
+                // -- Pick-up the payload #2 (new) --
+                // Send the "Capture" command to payload #2
+                // [BLOCKING] the IR_Controller will block and resend the command until the payload is inside
+                ir_nec_data.address = 0x02;
+                ir_nec_data.command = 0x02;
+                BaseType_t queue_status_debug = xQueueSend(xQueueIRdata, &ir_nec_data, portMAX_DELAY);
+                if( queue_status_debug != pdTRUE){
+                    ESP_LOGE(printerTask, "Queue Error: Capture command");
+                }
+
+                // -- Raise the gate --
+                ESP_LOGI( printerTask, "Gate controller has been triggered... duty = %ld", duty_1ms );
+
+                // Wake up the PWM peripheral &
+                // Send the corresponding Servo command
+                ESP_ERROR_CHECK( ledc_set_duty(PWM_GATE_SPEED_MODE, PWM_GATE_CHANNEL, duty_1ms) ); // Set the new PWM with 1000microsec high signal
+                ESP_ERROR_CHECK( ledc_update_duty(PWM_GATE_SPEED_MODE, PWM_GATE_CHANNEL) ); // Apply the new PWM
+
+                // Wait for the gate to fully retract itself
+                vTaskDelay(PWM_GATE_ACTIVE_TIME/portTICK_PERIOD_MS); 
+
+                // Reset and Put the peripheral back to sleep 
+                ESP_ERROR_CHECK( ledc_set_duty(PWM_GATE_SPEED_MODE, PWM_GATE_CHANNEL, duty_idle) ); // Reset the PWM 
+                ESP_ERROR_CHECK( ledc_update_duty(PWM_GATE_SPEED_MODE, PWM_GATE_CHANNEL) ); // Apply the new PWM
+                ESP_ERROR_CHECK( ledc_stop(PWM_GATE_SPEED_MODE, PWM_GATE_CHANNEL, 0) );
             }
         #endif
 
@@ -555,7 +592,7 @@ void uart_receiver( void* pvParameters ){
         if( another_request_needed ){
             // Trigger another altitude requestUART_DEBUG_FLAG
             #if ( UART_DEBUG_FLAG )
-                ESP_LOGI(printerTask, "Uart_receiver has notified the uart_sender");
+                ESP_LOGI(printerTask, "Uart_receiver didt'get any MAVLINK msg.");
             #endif
 
             xTaskNotifyGiveIndexed(uart_sender_taskHandler, 0);
@@ -589,7 +626,19 @@ void uart_sender( void* pvParameters ){
         ulTaskNotifyTakeIndexed(0, pdTRUE, portMAX_DELAY);
        
         // Flush the RX buffer to get the latest data
-        uart_flush_input(UART_PORT_NUM);
+        // TODO: Potentially link up first, then flush RX once and then start sending requests
+        //uart_flush_input(UART_PORT_NUM);
+        /*
+            TODO: subscribe, do not poll
+            uart_receiver 
+                runs all the time unless the state is STATE_LANDED
+                follows pre-specified frequency
+
+            uart_sender only:
+                waits until it sees HEARTBEAT (learn sysid/compid)
+                sends SET_MESSAGE_INTERVAL
+                then it can stop
+        */
 
         // Write data to UART.
         ESP_LOGI( printerTask, "Requesting data from mavlink..." );
@@ -628,7 +677,7 @@ void app_main(void) {
 
     // Stop interrupts from this pin until the gate is lowered 
     gpio_intr_disable(PWM_GATE_GPIO_NUM_REC);
-
+    
     // For debugging, comment out all tasks initializations in app_main except this GPIO init
     #if( PWM_GATE_REC_DEBUG_FLAG )
         // Enable interrupt
@@ -642,6 +691,7 @@ void app_main(void) {
             vTaskDelay(500/portTICK_PERIOD_MS);
         }
     #endif
+    
 
     // -- UART init begin --
     // Setup UART buffered IO with event queue
@@ -668,6 +718,7 @@ void app_main(void) {
     // Setup UART in rs485 half duplex mode
     ESP_ERROR_CHECK( uart_set_mode(UART_PORT_NUM, UART_MODE_UART) );
  
+    
     // -- Queues init --
     xQueueIRdata = xQueueCreate(1, sizeof(ir_nec_scan_code_t));
 
@@ -688,6 +739,7 @@ void app_main(void) {
         abort();
     }
 
+    
     // A task for managing the IR
     status = xTaskCreatePinnedToCore(
         ir_controller, // function
@@ -703,6 +755,7 @@ void app_main(void) {
         ESP_LOGE( printerTask, "Failed to create the IR_CONTROLLER task" );
         abort();
     }
+
 
     // A task for reseiving data over UART(using Mavlink2 as the payload format)
     status = xTaskCreatePinnedToCore(
@@ -736,6 +789,7 @@ void app_main(void) {
         ESP_LOGE( printerTask, "Failed to create the UART_SENDER task" );
         abort();
     }
+
     
     // Enable UART_sender
     xTaskNotifyGiveIndexed(uart_sender_taskHandler, 0);
