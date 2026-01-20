@@ -39,13 +39,14 @@
 #define ALT_AIRBORNE_THRESHOLD -500
 #define ALT_GATE_THRESHOLD -1200 
 
+#define GATE_GPIO_NUM_LIM   3 // Sends the PWM signal, D2
 #define PWM_GATE_GPIO_NUM_SIG   5 // Sends the PWM signal, D4
-#define PWM_GATE_GPIO_NUM_REC   6 // Gets triggered when the payload is inside the pick-up mechanism, D5
+#define GATE_GPIO_NUM_REC   6 // Gets triggered when the payload is inside the pick-up mechanism, D5
 #define PWM_GATE_TIMER_ID       LEDC_TIMER_0
 #define PWM_GATE_TIMER_RES      LEDC_TIMER_12_BIT
 #define PWM_GATE_SPEED_MODE     LEDC_LOW_SPEED_MODE
 #define PWM_GATE_CHANNEL        LEDC_CHANNEL_0
-#define PWM_GATE_ACTIVE_TIME    2000 // ms
+#define PWM_GATE_ACTIVE_TIME    200 // ms
 #define PWM_GATE_DELIVERY_WAIT  3000 // ms
 #define PWM_GATE_STOP_WAIT      1000 // ms
 #define PWM_GATE_QUEUE_WAIT     1000 // ms
@@ -120,6 +121,21 @@ static bool IRAM_ATTR ir_trans_done_callback(rmt_channel_handle_t tx_chan, const
     return high_task_wakeup;
 }
 
+static void IRAM_ATTR pillar_limitter_handler(void* arg){
+    BaseType_t high_task_wakeup = pdFALSE;
+    
+    // Notify the gate controller that the gate can't go lower/higher
+    vTaskNotifyGiveIndexedFromISR(gate_taskHandler, 1, &high_task_wakeup);
+
+    // Stop more interrupts from this pin until the gate needs to go the opposite direction 
+    gpio_intr_disable(GATE_GPIO_NUM_LIM);
+    
+    // GPIO ISR infrastructure requires manual high priority task worken yielding.
+    if (high_task_wakeup) {
+        portYIELD_FROM_ISR();  // yield so IR task can run immediately
+    }
+}
+
 static void IRAM_ATTR ir_rec_handler(void* arg){
     // Debugging feature. Make sure all the other tasks are commented out
     #if( PWM_GATE_REC_DEBUG_FLAG )
@@ -130,11 +146,11 @@ static void IRAM_ATTR ir_rec_handler(void* arg){
     // - Main logic -
     BaseType_t high_task_wakeup = pdFALSE;
     
-    // Notify the the IR handler that the payload has entered the pick-up mechanism
+    // Notify the IR handler that the payload has entered the pick-up mechanism
     vTaskNotifyGiveIndexedFromISR(ir_taskHandler, 1, &high_task_wakeup);
 
     // Stop more interrupts from this pin until the gate is lowered again
-    gpio_intr_disable(PWM_GATE_GPIO_NUM_REC);
+    gpio_intr_disable(GATE_GPIO_NUM_REC);
     
     // GPIO ISR infrastructure requires manual high priority task worken yielding.
     if (high_task_wakeup) {
@@ -344,8 +360,8 @@ void ir_controller( void* pvParameters ){
         // In case command == Capture,
         // Keep resending the IR command until the payload is inside 
         if( ir_nec_data.command == 0x02 ){
-            // Enable the pin interrupt
-            gpio_intr_enable(PWM_GATE_GPIO_NUM_REC);
+            // Enable the pin interrupt (Disabled in the ISR)
+            gpio_intr_enable(GATE_GPIO_NUM_REC);
             ESP_LOGI(printerTask, "PWM GATE Interrupt has been enabled");
 
             // [BLOCKING] Wait for the notification from the ISR triggered by the payload
@@ -372,6 +388,7 @@ void gate_controller( void* pvParameters ){
     /*
         [INFO] Notification Indexes
         Index 0 source - handle_mavlink_msg, whenever the drone has landed
+        Index 1 source - pillar_limitter_handler, ISR triggered by the gate fully extending / retraction
     */
 
     // --- Init the gate controller ---
@@ -487,8 +504,14 @@ void gate_controller( void* pvParameters ){
         ESP_ERROR_CHECK( ledc_set_duty(PWM_GATE_SPEED_MODE, PWM_GATE_CHANNEL, duty_2ms) ); // Set the new PWM with 2000microsec high signal
         ESP_ERROR_CHECK( ledc_update_duty(PWM_GATE_SPEED_MODE, PWM_GATE_CHANNEL) ); // Apply the new PWM
 
-        // Wait for the gate to fully extend down
+        // Wait for the gate to leave the top condcutive tape
         vTaskDelay(PWM_GATE_ACTIVE_TIME/portTICK_PERIOD_MS);
+
+        // Enable the gate limitter pin interrupt (Disabled in the ISR)
+        gpio_intr_enable(GATE_GPIO_NUM_LIM);
+
+        // [BLOCKING] Wait until the gate is fully extended
+        ulTaskNotifyTakeIndexed(1, pdTRUE, portMAX_DELAY);
 
         // Reset and Put the peripheral back to sleep
         ESP_ERROR_CHECK( ledc_set_duty(PWM_GATE_SPEED_MODE, PWM_GATE_CHANNEL, duty_idle) ); // Reset the PWM 
@@ -539,7 +562,13 @@ void gate_controller( void* pvParameters ){
         ESP_ERROR_CHECK( ledc_update_duty(PWM_GATE_SPEED_MODE, PWM_GATE_CHANNEL) ); // Apply the new PWM
 
         // Wait for the gate to fully retract itself
-        vTaskDelay(PWM_GATE_ACTIVE_TIME/portTICK_PERIOD_MS); 
+        vTaskDelay(PWM_GATE_ACTIVE_TIME/portTICK_PERIOD_MS);
+
+        // Enable the gate limitter interrupt pin (Disabled in the ISR)
+        gpio_intr_enable(GATE_GPIO_NUM_LIM);
+
+        // [BLOCKING] Wait until the gate is fully retracted 
+        ulTaskNotifyTakeIndexed(1, pdTRUE, portMAX_DELAY);
 
         // Reset and Put the peripheral back to sleep 
         ESP_ERROR_CHECK( ledc_set_duty(PWM_GATE_SPEED_MODE, PWM_GATE_CHANNEL, duty_idle) ); // Reset the PWM 
@@ -663,25 +692,32 @@ void app_main(void) {
     // The GPIO will wait for the payload to close an open circuit to trigger the raise of the pick-up mechanism
     
     // GPIO config
-    gpio_config_t pwm_gate_gpio_config = {0};
-    pwm_gate_gpio_config.pin_bit_mask = 1ULL << PWM_GATE_GPIO_NUM_REC;
-    pwm_gate_gpio_config.mode = GPIO_MODE_INPUT;
-    pwm_gate_gpio_config.pull_up_en = GPIO_PULLUP_DISABLE;
-    pwm_gate_gpio_config.pull_down_en = GPIO_PULLDOWN_ENABLE;
-    pwm_gate_gpio_config.intr_type = GPIO_INTR_POSEDGE;
-    ESP_ERROR_CHECK( gpio_config(&pwm_gate_gpio_config) );
+    gpio_config_t gpios_config = {0};
+    gpios_config.mode = GPIO_MODE_INPUT;
+    gpios_config.pull_up_en = GPIO_PULLUP_DISABLE;
+    gpios_config.pull_down_en = GPIO_PULLDOWN_ENABLE;
+    gpios_config.intr_type = GPIO_INTR_POSEDGE;
 
-    // Configure ISR
+    // Gate GPIO for the payload receiving
+    gpios_config.pin_bit_mask = 1ULL << GATE_GPIO_NUM_REC;
+    ESP_ERROR_CHECK( gpio_config(&gpios_config) );
+
+    // Gate GPIO for the pillar limitting
+    gpios_config.pin_bit_mask = 1ULL << GATE_GPIO_NUM_LIM;
+    ESP_ERROR_CHECK( gpio_config(&gpios_config) );
+
+    // Configure ISRs
     ESP_ERROR_CHECK( gpio_install_isr_service(ESP_INTR_FLAG_IRAM) );
-    ESP_ERROR_CHECK( gpio_isr_handler_add(PWM_GATE_GPIO_NUM_REC, ir_rec_handler, NULL) );
+    ESP_ERROR_CHECK( gpio_isr_handler_add(GATE_GPIO_NUM_REC, ir_rec_handler, NULL) );
+    ESP_ERROR_CHECK( gpio_isr_handler_add(GATE_GPIO_NUM_LIM, pillar_limitter_handler, NULL) );
 
     // Stop interrupts from this pin until the gate is lowered 
-    gpio_intr_disable(PWM_GATE_GPIO_NUM_REC);
+    gpio_intr_disable(GATE_GPIO_NUM_REC);
     
     // For debugging, comment out all tasks initializations in app_main except this GPIO init
     #if( PWM_GATE_REC_DEBUG_FLAG )
         // Enable interrupt
-        gpio_intr_enable(PWM_GATE_GPIO_NUM_REC);
+        gpio_intr_enable(GATE_GPIO_NUM_REC);
         ESP_LOGI(printerTask, "[WARNING] PWM GATE GPIO Interrupt debug mode has been enabled");
 
         while(TRUE){
