@@ -51,31 +51,62 @@ void gate_controller( void* pvParameters ){
         #if( PWM_GATE_SIG_DEBUG_FLAG )
             ESP_LOGI(printerVar, "[WARNING] PWM_GATE debug mode has been enabled");
             while ( TRUE ) {
-                // Wake up the PWM peripheral &
-                // Send the all Servo commands with 1sec delay in-between
-                ESP_LOGI( printerVar, "Gate controller has been triggered... duty = %ld", duty_idle);
-                ESP_ERROR_CHECK( ledc_set_duty(PWM_GATE_SPEED_MODE, PWM_GATE_CHANNEL, duty_idle) ); // Set the new PWM frequency
-                ESP_ERROR_CHECK( ledc_update_duty(PWM_GATE_SPEED_MODE, PWM_GATE_CHANNEL) ); // Apply the new PWM
-                vTaskDelay(2000 / portTICK_PERIOD_MS);
+                // Delay for a bit for smooth debugging:
+                ESP_LOGI( printeVar, "1 second delay in-between..." );
+                vTaskDelay( 1000/portTICK_PERIOD_MS );
 
+                // -- Lower the gate --
                 ESP_LOGI( printerVar, "Gate controller has been triggered... duty = %ld", duty_2ms );
-                ESP_ERROR_CHECK( ledc_set_duty(PWM_GATE_SPEED_MODE, PWM_GATE_CHANNEL, duty_2ms) ); // Set the new PWM frequency
-                ESP_ERROR_CHECK( ledc_update_duty(PWM_GATE_SPEED_MODE, PWM_GATE_CHANNEL) ); // Apply the new PWM
-                vTaskDelay(2000 / portTICK_PERIOD_MS);
 
-                ESP_LOGI( printerVar, "Gate controller has been triggered... duty = %ld", duty_idle);
-                ESP_ERROR_CHECK( ledc_set_duty(PWM_GATE_SPEED_MODE, PWM_GATE_CHANNEL, duty_idle) ); // Set the new PWM frequency
+                // Wake up the PWM peripheral &
+                // Send the corresponding Servo command
+                ESP_ERROR_CHECK( ledc_set_duty(PWM_GATE_SPEED_MODE, PWM_GATE_CHANNEL, duty_2ms) ); // Set the new PWM with 2000microsec high signal
                 ESP_ERROR_CHECK( ledc_update_duty(PWM_GATE_SPEED_MODE, PWM_GATE_CHANNEL) ); // Apply the new PWM
-                vTaskDelay(2000 / portTICK_PERIOD_MS);
 
+                // Wait for the gate to leave the top condcutive tape
+                vTaskDelay(PWM_GATE_ACTIVE_TIME/portTICK_PERIOD_MS);
+
+                // Enable the gate limitter pin interrupt (Disabled in the ISR)
+                gpio_intr_enable(GATE_GPIO_NUM_LIM);
+
+                // [BLOCKING] Wait until the gate is fully extended
+                ulTaskNotifyTakeIndexed(1, pdTRUE, portMAX_DELAY);
+
+                // Reset and Put the peripheral back to sleep
+                ESP_ERROR_CHECK( ledc_set_duty(PWM_GATE_SPEED_MODE, PWM_GATE_CHANNEL, duty_idle) ); // Reset the PWM 
+                ESP_ERROR_CHECK( ledc_update_duty(PWM_GATE_SPEED_MODE, PWM_GATE_CHANNEL) ); // Apply the new PWM
+                ESP_ERROR_CHECK( ledc_stop(PWM_GATE_SPEED_MODE, PWM_GATE_CHANNEL, 0) );
+
+                // Delay for a bit for smooth debugging:
+                ESP_LOGI( printeVar, "1 second delay in-between..." );
+                vTaskDelay( 1000/portTICK_PERIOD_MS );
+
+                // -- Raise the gate --
                 ESP_LOGI( printerVar, "Gate controller has been triggered... duty = %ld", duty_1ms );
-                ESP_ERROR_CHECK( ledc_set_duty(PWM_GATE_SPEED_MODE, PWM_GATE_CHANNEL, duty_1ms) ); // Set the new PWM frequency
+
+                // Wake up the PWM peripheral &
+                // Send the corresponding Servo command
+                ESP_ERROR_CHECK( ledc_set_duty(PWM_GATE_SPEED_MODE, PWM_GATE_CHANNEL, duty_1ms) ); // Set the new PWM with 1000microsec high signal
                 ESP_ERROR_CHECK( ledc_update_duty(PWM_GATE_SPEED_MODE, PWM_GATE_CHANNEL) ); // Apply the new PWM
-                vTaskDelay(2000 / portTICK_PERIOD_MS);
+
+                // Wait for the gate to fully retract itself
+                vTaskDelay(PWM_GATE_ACTIVE_TIME/portTICK_PERIOD_MS);
+
+                // Enable the gate limitter interrupt pin (Disabled in the ISR)
+                gpio_intr_enable(GATE_GPIO_NUM_LIM);
+
+                // [BLOCKING] Wait until the gate is fully retracted 
+                ulTaskNotifyTakeIndexed(1, pdTRUE, portMAX_DELAY);
+
+                // Reset and Put the peripheral back to sleep 
+                ESP_ERROR_CHECK( ledc_set_duty(PWM_GATE_SPEED_MODE, PWM_GATE_CHANNEL, duty_idle) ); // Reset the PWM 
+                ESP_ERROR_CHECK( ledc_update_duty(PWM_GATE_SPEED_MODE, PWM_GATE_CHANNEL) ); // Apply the new PWM
+                ESP_ERROR_CHECK( ledc_stop(PWM_GATE_SPEED_MODE, PWM_GATE_CHANNEL, 0) );
             }
         #endif
 
         // Debugging feature. Make sure all the other tasks besides the IR_controller are commented out
+        // [NOTE] This debugging procedure lowers and retracts the gate in a timely manner
         #if( GATE_IR_DEBUG_FLAG )
             ESP_LOGI(printerVar, "[WARNING] IR with PWM_GATE debug mode has been enabled");
             while( TRUE ){
