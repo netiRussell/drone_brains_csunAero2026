@@ -15,6 +15,7 @@
 #include "driver/ledc.h"
 #include "driver/rmt_tx.h"
 #include "nec_ir/ir_nec_encoder.h"
+#include "driver/pulse_cnt.h"
 
 #include <c_library_v2/common/mavlink.h>
 
@@ -37,7 +38,7 @@
 #define ALT_AIRBORNE_THRESHOLD -500
 #define ALT_GATE_THRESHOLD -1200 
 
-#define GATE_GPIO_NUM_LIM   3 // Sends the PWM signal, D2
+#define GATE_GPIO_NUM_LIM   2 // Sends the PWM signal, D1
 #define PWM_GATE_GPIO_NUM_SIG   5 // Sends the PWM signal, D4
 #define GATE_GPIO_NUM_REC   6 // Gets triggered when the payload is inside the pick-up mechanism, D5
 #define PWM_GATE_TIMER_ID       LEDC_TIMER_0
@@ -50,7 +51,7 @@
 #define PWM_GATE_QUEUE_WAIT     1000 // ms
 
 #define RMT_GPIO_NUM        4 // Sends the IR signal, D3
-#define IR_RESOLUTION_HZ    1000000 // 1Mhz, Period = 1micro sec.
+#define PWM_RESOLUTION_HZ    1000000 // 1Mhz, Period = 1micro sec.
 #define IR_CAPTURE_RESEND_WAIT 1000 // ms
 
 // Set only one flag at a time (besides the UART_DEBUG_FLAG and MAVLINK_DEBUG_FLAG)

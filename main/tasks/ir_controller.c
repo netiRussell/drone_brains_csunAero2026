@@ -29,7 +29,7 @@ void ir_controller( void* pvParameters ){
         .clk_src = RMT_CLK_SRC_DEFAULT,   // select source clock
         .gpio_num = RMT_GPIO_NUM,         // GPIO number
         .mem_block_symbols = 64,          // memory block size, 64 * 4 = 256 Bytes
-        .resolution_hz = IR_RESOLUTION_HZ, // 1 MHz tick resolution, i.e., 1 tick = 1 µs
+        .resolution_hz = PWM_RESOLUTION_HZ, // 1 MHz tick resolution, i.e., 1 tick = 1 µs
         .trans_queue_depth = 4,           // set the number of transactions that can pend in the background
         .flags.with_dma = false,          // do not need DMA backend
     };
@@ -48,7 +48,7 @@ void ir_controller( void* pvParameters ){
 
     // RMT encoder init (mechanism that turns raw data into NEC RMT symbols)
     ir_nec_encoder_config_t nec_encoder_cfg = {
-        .resolution = IR_RESOLUTION_HZ,
+        .resolution = PWM_RESOLUTION_HZ,
     };
     rmt_encoder_handle_t nec_encoder = NULL;
     ESP_ERROR_CHECK(rmt_new_ir_nec_encoder(&nec_encoder_cfg, &nec_encoder));

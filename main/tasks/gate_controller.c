@@ -1,13 +1,24 @@
 #include "gate_controller.h"
 
+// -- ISR --
+bool IRAM_ATTR pillar_limitter_handler(pcnt_unit_handle_t unit, const pcnt_watch_event_data_t *edata, void *user_ctx){
+    BaseType_t high_task_wakeup = pdFALSE;
+    
+    // Notify the gate controller that PCNT has reached the watch_point
+    vTaskNotifyGiveIndexedFromISR(gate_taskHandler, 1, &high_task_wakeup);
+
+    return (high_task_wakeup == pdTRUE); 
+}
+
+// -- Task Definition --
 void gate_controller( void* pvParameters ){
     /*
         [INFO] Notification Indexes
         Index 0 source - handle_mavlink_msg, whenever the drone has landed
-        Index 1 source - pillar_limitter_handler, ISR triggered by the gate fully extending / retraction
+        Index 1 source - pillar_limitter_handler, whenever the PCNT has reached the watch point
     */
 
-    // --- Init the gate controller ---
+    // -- Init the PWM generator (LEDC) --
     // Timer Init
     ledc_timer_config_t timer_config = {0};
     timer_config.speed_mode = PWM_GATE_SPEED_MODE;
@@ -34,7 +45,40 @@ void gate_controller( void* pvParameters ){
     // Put the PWM peripheral to sleep with LOW idle level
     ESP_ERROR_CHECK( ledc_stop(PWM_GATE_SPEED_MODE, PWM_GATE_CHANNEL, 0) );
 
-    // Precompute duties
+    // -- Init the PWM reader (PCNT) --
+    // Install PCNT unit
+    #define EXAMPLE_PCNT_HIGH_LIMIT 2000 
+    #define EXAMPLE_PCNT_LOW_LIMIT  -2000
+
+    pcnt_unit_config_t unit_config = {
+        .high_limit = EXAMPLE_PCNT_HIGH_LIMIT,
+        .low_limit = EXAMPLE_PCNT_LOW_LIMIT,
+    };
+    pcnt_unit_handle_t pcnt_unit = NULL;
+    ESP_ERROR_CHECK(pcnt_new_unit(&unit_config, &pcnt_unit)); 
+
+    // Install PCNT channel
+    pcnt_chan_config_t chan_config = {
+        .edge_gpio_num = GATE_GPIO_NUM_LIM,
+        .level_gpio_num = -1, // not used
+    };
+    pcnt_channel_handle_t pcnt_chan = NULL;
+    ESP_ERROR_CHECK(pcnt_new_channel(pcnt_unit, &chan_config, &pcnt_chan));
+
+    // Channel actions
+    // increase the counter on rising edge, hold the counter on falling edge
+    ESP_ERROR_CHECK(pcnt_channel_set_edge_action(pcnt_chan, PCNT_CHANNEL_EDGE_ACTION_INCREASE, PCNT_CHANNEL_EDGE_ACTION_HOLD));
+
+    // Add high limit watch point
+    ESP_ERROR_CHECK(pcnt_unit_add_watch_point(pcnt_unit, EXAMPLE_PCNT_HIGH_LIMIT));
+
+    // Register PCNT callback(triggered when the watch point is reached)
+    pcnt_event_callbacks_t cbs = {
+        .on_reach = pillar_limitter_handler,
+    };
+    ESP_ERROR_CHECK(pcnt_unit_register_event_callbacks(pcnt_unit, &cbs, NULL));
+
+    // -- Precompute duties --
     // Formula: number of max ticks in the clock * ratio of the clock that will stay High
     const uint32_t max_duty   = (1 << PWM_GATE_TIMER_RES) - 1; // Max value the clock reaches
     // Integer division is avoided by changing the formula into:
@@ -42,17 +86,43 @@ void gate_controller( void* pvParameters ){
     const uint32_t duty_1ms   = (max_duty * 1000) / 20000; // full up
     const uint32_t duty_idle  = (max_duty * 1650) / 20000; // neutral
 
-    // IR payload holder
+    // -- IR payload holder --
     ir_nec_scan_code_t ir_nec_data = {0};
 
-    // --- Main logic ---
+    // -- Main logic --
     while( TRUE ){
         // Debugging feature. Make sure all the other tasks are commented out
         #if( PWM_GATE_SIG_DEBUG_FLAG )
             ESP_LOGI(printerVar, "[WARNING] PWM_GATE debug mode has been enabled");
+
+            // -- Lower the gate --
+            ESP_LOGI( printerVar, "Gate controller has been triggered... duty = %ld", duty_2ms );
+
+            // Wake up the PWM peripheral &
+            // Send the corresponding Servo command
+            ESP_ERROR_CHECK( ledc_set_duty(PWM_GATE_SPEED_MODE, PWM_GATE_CHANNEL, duty_2ms) ); // Set the new PWM with 2000microsec high signal
+            ESP_ERROR_CHECK( ledc_update_duty(PWM_GATE_SPEED_MODE, PWM_GATE_CHANNEL) ); // Apply the new PWM
+
+            // -- Pulse couning --
+            ESP_ERROR_CHECK( pcnt_unit_enable(pcnt_unit) );
+            ESP_ERROR_CHECK( pcnt_unit_start(pcnt_unit) );
+            while (TRUE) {
+                // [BLOCKING] Wait until the gate is fully extended
+                ulTaskNotifyTakeIndexed(1, pdTRUE, portMAX_DELAY);
+                ESP_LOGI( printerVar, "Max is reached" );
+                vTaskDelay( 1000/portTICK_PERIOD_MS );
+                ESP_ERROR_CHECK( pcnt_unit_clear_count(pcnt_unit) );
+            }
+            ESP_ERROR_CHECK( pcnt_unit_stop(pcnt_unit) );
+            ESP_ERROR_CHECK( pcnt_unit_clear_count(pcnt_unit) );
+            ESP_ERROR_CHECK( pcnt_unit_disable(pcnt_unit) );
+
+
+
+
             while ( TRUE ) {
                 // Delay for a bit for smooth debugging:
-                ESP_LOGI( printeVar, "1 second delay in-between..." );
+                ESP_LOGI( printerVar, "1 second delay in-between..." );
                 vTaskDelay( 1000/portTICK_PERIOD_MS );
 
                 // -- Lower the gate --
@@ -78,7 +148,7 @@ void gate_controller( void* pvParameters ){
                 ESP_ERROR_CHECK( ledc_stop(PWM_GATE_SPEED_MODE, PWM_GATE_CHANNEL, 0) );
 
                 // Delay for a bit for smooth debugging:
-                ESP_LOGI( printeVar, "1 second delay in-between..." );
+                ESP_LOGI( printerVar, "1 second delay in-between..." );
                 vTaskDelay( 1000/portTICK_PERIOD_MS );
 
                 // -- Raise the gate --

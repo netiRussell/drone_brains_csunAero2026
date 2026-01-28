@@ -37,14 +37,9 @@ void app_main(void) {
     gpios_config.pin_bit_mask = 1ULL << GATE_GPIO_NUM_REC;
     ESP_ERROR_CHECK( gpio_config(&gpios_config) );
 
-    // Gate GPIO for the pillar limitting
-    gpios_config.pin_bit_mask = 1ULL << GATE_GPIO_NUM_LIM;
-    ESP_ERROR_CHECK( gpio_config(&gpios_config) );
-
     // Configure ISRs
     ESP_ERROR_CHECK( gpio_install_isr_service(ESP_INTR_FLAG_IRAM) );
     ESP_ERROR_CHECK( gpio_isr_handler_add(GATE_GPIO_NUM_REC, ir_rec_handler, NULL) );
-    ESP_ERROR_CHECK( gpio_isr_handler_add(GATE_GPIO_NUM_LIM, pillar_limitter_handler, NULL) );
 
     // Stop interrupts from this pin until the gate is lowered 
     gpio_intr_disable(GATE_GPIO_NUM_REC);
@@ -68,7 +63,7 @@ void app_main(void) {
     // Setup UART buffered IO with event queue
     const uint16_t uart_buffer_size = (1024 * 2);
     QueueHandle_t uart_queue;
-
+/*
     // Install UART driver using an event queue here
     ESP_ERROR_CHECK( uart_driver_install(UART_PORT_NUM, uart_buffer_size, uart_buffer_size, 10, &uart_queue, 0) );
 
@@ -88,7 +83,7 @@ void app_main(void) {
 
     // Setup UART in rs485 half duplex mode
     ESP_ERROR_CHECK( uart_set_mode(UART_PORT_NUM, UART_MODE_UART) );
- 
+ */
     
     // -- Queues init --
     xQueueIRdata = xQueueCreate(1, sizeof(ir_nec_scan_code_t));
@@ -111,7 +106,7 @@ void app_main(void) {
         abort();
     }
 
-    
+ /*   
     // A task for managing the IR
     status = xTaskCreatePinnedToCore(
         ir_controller, // function
@@ -165,4 +160,5 @@ void app_main(void) {
     
     // Enable UART_sender
     xTaskNotifyGiveIndexed(uart_sender_taskHandler, 0);
+*/
 }
