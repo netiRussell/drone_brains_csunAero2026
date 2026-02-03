@@ -56,7 +56,7 @@
 
 // Set only one flag at a time (besides the UART_DEBUG_FLAG and MAVLINK_DEBUG_FLAG)
 #define PWM_GATE_REC_DEBUG_FLAG         0 // 1 = True, anything else = False 
-#define PWM_GATE_SIG_DEBUG_FLAG         1 // 1 = True, anything else = False
+#define PWM_GATE_SIG_DEBUG_FLAG         0 // 1 = True, anything else = False
 #define IR_DEBUG_FLAG                   0 // 1 = True, anything else = False
 #define MAVLINK_DEBUG_FLAG              0 // 1 = True, anything else = False
 #define UART_DEBUG_FLAG                 1 // 1 = True, anything else = False

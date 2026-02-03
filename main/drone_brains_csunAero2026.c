@@ -21,7 +21,6 @@
 
 
 // --- Main function ---
-// TODO: Use multiple cores
 void app_main(void) {
     // -- ISR based, GPIO init --
     // The GPIO will wait for the payload to close an open circuit to trigger the raise of the pick-up mechanism
@@ -63,7 +62,7 @@ void app_main(void) {
     // Setup UART buffered IO with event queue
     const uint16_t uart_buffer_size = (1024 * 2);
     QueueHandle_t uart_queue;
-/*
+
     // Install UART driver using an event queue here
     ESP_ERROR_CHECK( uart_driver_install(UART_PORT_NUM, uart_buffer_size, uart_buffer_size, 10, &uart_queue, 0) );
 
@@ -83,7 +82,6 @@ void app_main(void) {
 
     // Setup UART in rs485 half duplex mode
     ESP_ERROR_CHECK( uart_set_mode(UART_PORT_NUM, UART_MODE_UART) );
- */
     
     // -- Queues init --
     xQueueIRdata = xQueueCreate(1, sizeof(ir_nec_scan_code_t));
@@ -106,7 +104,6 @@ void app_main(void) {
         abort();
     }
 
- /*   
     // A task for managing the IR
     status = xTaskCreatePinnedToCore(
         ir_controller, // function
@@ -160,5 +157,4 @@ void app_main(void) {
     
     // Enable UART_sender
     xTaskNotifyGiveIndexed(uart_sender_taskHandler, 0);
-*/
 }

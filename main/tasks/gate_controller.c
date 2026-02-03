@@ -95,83 +95,34 @@ void gate_controller( void* pvParameters ){
         #if( PWM_GATE_SIG_DEBUG_FLAG )
             ESP_LOGI(printerVar, "[WARNING] PWM_GATE debug mode has been enabled");
 
-            // -- Lower the gate --
-            ESP_LOGI( printerVar, "Gate controller has been triggered... duty = %ld", duty_2ms );
-
-            // Wake up the PWM peripheral &
-            // Send the corresponding Servo command
-            ESP_ERROR_CHECK( ledc_set_duty(PWM_GATE_SPEED_MODE, PWM_GATE_CHANNEL, duty_2ms) ); // Set the new PWM with 2000microsec high signal
-            ESP_ERROR_CHECK( ledc_update_duty(PWM_GATE_SPEED_MODE, PWM_GATE_CHANNEL) ); // Apply the new PWM
-
-            // -- Pulse couning --
-            ESP_ERROR_CHECK( pcnt_unit_enable(pcnt_unit) );
-            ESP_ERROR_CHECK( pcnt_unit_start(pcnt_unit) );
-            while (TRUE) {
-                // [BLOCKING] Wait until the gate is fully extended
-                ulTaskNotifyTakeIndexed(1, pdTRUE, portMAX_DELAY);
-                ESP_LOGI( printerVar, "Max is reached" );
-                vTaskDelay( 1000/portTICK_PERIOD_MS );
-                ESP_ERROR_CHECK( pcnt_unit_clear_count(pcnt_unit) );
-            }
-            ESP_ERROR_CHECK( pcnt_unit_stop(pcnt_unit) );
-            ESP_ERROR_CHECK( pcnt_unit_clear_count(pcnt_unit) );
-            ESP_ERROR_CHECK( pcnt_unit_disable(pcnt_unit) );
-
-
-
-
-            while ( TRUE ) {
-                // Delay for a bit for smooth debugging:
-                ESP_LOGI( printerVar, "1 second delay in-between..." );
-                vTaskDelay( 1000/portTICK_PERIOD_MS );
-
+            while(TRUE){    
                 // -- Lower the gate --
                 ESP_LOGI( printerVar, "Gate controller has been triggered... duty = %ld", duty_2ms );
 
-                // Wake up the PWM peripheral &
+                // Enable PCNT to count pulses
+                ESP_ERROR_CHECK( pcnt_unit_enable(pcnt_unit) );
+                ESP_ERROR_CHECK( pcnt_unit_start(pcnt_unit) );
+
+                // Wake up the PWM generator (LEDC) peripheral &
                 // Send the corresponding Servo command
                 ESP_ERROR_CHECK( ledc_set_duty(PWM_GATE_SPEED_MODE, PWM_GATE_CHANNEL, duty_2ms) ); // Set the new PWM with 2000microsec high signal
                 ESP_ERROR_CHECK( ledc_update_duty(PWM_GATE_SPEED_MODE, PWM_GATE_CHANNEL) ); // Apply the new PWM
 
-                // Wait for the gate to leave the top condcutive tape
-                vTaskDelay(PWM_GATE_ACTIVE_TIME/portTICK_PERIOD_MS);
-
-                // Enable the gate limitter pin interrupt (Disabled in the ISR)
-                gpio_intr_enable(GATE_GPIO_NUM_LIM);
-
-                // [BLOCKING] Wait until the gate is fully extended
+                // [BLOCKING] Wait until the DC motor encoder has provided enough pulses
                 ulTaskNotifyTakeIndexed(1, pdTRUE, portMAX_DELAY);
+                ESP_LOGI( printerVar, "PCNT has reached the threshold" );
 
-                // Reset and Put the peripheral back to sleep
+                // Reset and disable LEDC 
                 ESP_ERROR_CHECK( ledc_set_duty(PWM_GATE_SPEED_MODE, PWM_GATE_CHANNEL, duty_idle) ); // Reset the PWM 
                 ESP_ERROR_CHECK( ledc_update_duty(PWM_GATE_SPEED_MODE, PWM_GATE_CHANNEL) ); // Apply the new PWM
                 ESP_ERROR_CHECK( ledc_stop(PWM_GATE_SPEED_MODE, PWM_GATE_CHANNEL, 0) );
 
-                // Delay for a bit for smooth debugging:
-                ESP_LOGI( printerVar, "1 second delay in-between..." );
-                vTaskDelay( 1000/portTICK_PERIOD_MS );
+                // Reset and disable PCNT
+                ESP_ERROR_CHECK( pcnt_unit_stop(pcnt_unit) );
+                ESP_ERROR_CHECK( pcnt_unit_clear_count(pcnt_unit) );
+                ESP_ERROR_CHECK( pcnt_unit_disable(pcnt_unit) );
 
-                // -- Raise the gate --
-                ESP_LOGI( printerVar, "Gate controller has been triggered... duty = %ld", duty_1ms );
-
-                // Wake up the PWM peripheral &
-                // Send the corresponding Servo command
-                ESP_ERROR_CHECK( ledc_set_duty(PWM_GATE_SPEED_MODE, PWM_GATE_CHANNEL, duty_1ms) ); // Set the new PWM with 1000microsec high signal
-                ESP_ERROR_CHECK( ledc_update_duty(PWM_GATE_SPEED_MODE, PWM_GATE_CHANNEL) ); // Apply the new PWM
-
-                // Wait for the gate to fully retract itself
-                vTaskDelay(PWM_GATE_ACTIVE_TIME/portTICK_PERIOD_MS);
-
-                // Enable the gate limitter interrupt pin (Disabled in the ISR)
-                gpio_intr_enable(GATE_GPIO_NUM_LIM);
-
-                // [BLOCKING] Wait until the gate is fully retracted 
-                ulTaskNotifyTakeIndexed(1, pdTRUE, portMAX_DELAY);
-
-                // Reset and Put the peripheral back to sleep 
-                ESP_ERROR_CHECK( ledc_set_duty(PWM_GATE_SPEED_MODE, PWM_GATE_CHANNEL, duty_idle) ); // Reset the PWM 
-                ESP_ERROR_CHECK( ledc_update_duty(PWM_GATE_SPEED_MODE, PWM_GATE_CHANNEL) ); // Apply the new PWM
-                ESP_ERROR_CHECK( ledc_stop(PWM_GATE_SPEED_MODE, PWM_GATE_CHANNEL, 0) );
+                vTaskDelay(1000/portTICK_PERIOD_MS);
             }
         #endif
 
@@ -216,24 +167,28 @@ void gate_controller( void* pvParameters ){
         // -- Lower the gate --
         ESP_LOGI( printerVar, "Gate controller has been triggered... duty = %ld", duty_2ms );
 
-        // Wake up the PWM peripheral &
+        // Enable PCNT to count pulses
+        ESP_ERROR_CHECK( pcnt_unit_enable(pcnt_unit) );
+        ESP_ERROR_CHECK( pcnt_unit_start(pcnt_unit) );
+
+        // Wake up the PWM generator (LEDC) peripheral &
         // Send the corresponding Servo command
         ESP_ERROR_CHECK( ledc_set_duty(PWM_GATE_SPEED_MODE, PWM_GATE_CHANNEL, duty_2ms) ); // Set the new PWM with 2000microsec high signal
         ESP_ERROR_CHECK( ledc_update_duty(PWM_GATE_SPEED_MODE, PWM_GATE_CHANNEL) ); // Apply the new PWM
 
-        // Wait for the gate to leave the top condcutive tape
-        vTaskDelay(PWM_GATE_ACTIVE_TIME/portTICK_PERIOD_MS);
-
-        // Enable the gate limitter pin interrupt (Disabled in the ISR)
-        gpio_intr_enable(GATE_GPIO_NUM_LIM);
-
-        // [BLOCKING] Wait until the gate is fully extended
+        // [BLOCKING] Wait until the DC motor encoder has provided enough pulses
         ulTaskNotifyTakeIndexed(1, pdTRUE, portMAX_DELAY);
+        ESP_LOGI( printerVar, "PCNT has reached the threshold" );
 
-        // Reset and Put the peripheral back to sleep
+        // Reset and disable LEDC 
         ESP_ERROR_CHECK( ledc_set_duty(PWM_GATE_SPEED_MODE, PWM_GATE_CHANNEL, duty_idle) ); // Reset the PWM 
         ESP_ERROR_CHECK( ledc_update_duty(PWM_GATE_SPEED_MODE, PWM_GATE_CHANNEL) ); // Apply the new PWM
         ESP_ERROR_CHECK( ledc_stop(PWM_GATE_SPEED_MODE, PWM_GATE_CHANNEL, 0) );
+
+        // Reset and disable PCNT
+        ESP_ERROR_CHECK( pcnt_unit_stop(pcnt_unit) );
+        ESP_ERROR_CHECK( pcnt_unit_clear_count(pcnt_unit) );
+        ESP_ERROR_CHECK( pcnt_unit_disable(pcnt_unit) );
        
         // -- Deliver the payload #1(current) --
         // [BLOCKING] Send the "Deliver" command to payload #1
@@ -273,24 +228,28 @@ void gate_controller( void* pvParameters ){
         // -- Raise the gate --
         ESP_LOGI( printerVar, "Gate controller has been triggered... duty = %ld", duty_1ms );
 
-        // Wake up the PWM peripheral &
+        // Enable PCNT to count pulses
+        ESP_ERROR_CHECK( pcnt_unit_enable(pcnt_unit) );
+        ESP_ERROR_CHECK( pcnt_unit_start(pcnt_unit) );
+
+        // Wake up the PWM generator (LEDC) peripheral &
         // Send the corresponding Servo command
-        ESP_ERROR_CHECK( ledc_set_duty(PWM_GATE_SPEED_MODE, PWM_GATE_CHANNEL, duty_1ms) ); // Set the new PWM with 1000microsec high signal
+        ESP_ERROR_CHECK( ledc_set_duty(PWM_GATE_SPEED_MODE, PWM_GATE_CHANNEL, duty_1ms) ); // Set the new PWM with 2000microsec high signal
         ESP_ERROR_CHECK( ledc_update_duty(PWM_GATE_SPEED_MODE, PWM_GATE_CHANNEL) ); // Apply the new PWM
 
-        // Wait for the gate to fully retract itself
-        vTaskDelay(PWM_GATE_ACTIVE_TIME/portTICK_PERIOD_MS);
-
-        // Enable the gate limitter interrupt pin (Disabled in the ISR)
-        gpio_intr_enable(GATE_GPIO_NUM_LIM);
-
-        // [BLOCKING] Wait until the gate is fully retracted 
+        // [BLOCKING] Wait until the DC motor encoder has provided enough pulses
         ulTaskNotifyTakeIndexed(1, pdTRUE, portMAX_DELAY);
+        ESP_LOGI( printerVar, "PCNT has reached the threshold" );
 
-        // Reset and Put the peripheral back to sleep 
+        // Reset and disable LEDC 
         ESP_ERROR_CHECK( ledc_set_duty(PWM_GATE_SPEED_MODE, PWM_GATE_CHANNEL, duty_idle) ); // Reset the PWM 
         ESP_ERROR_CHECK( ledc_update_duty(PWM_GATE_SPEED_MODE, PWM_GATE_CHANNEL) ); // Apply the new PWM
         ESP_ERROR_CHECK( ledc_stop(PWM_GATE_SPEED_MODE, PWM_GATE_CHANNEL, 0) );
+
+        // Reset and disable PCNT
+        ESP_ERROR_CHECK( pcnt_unit_stop(pcnt_unit) );
+        ESP_ERROR_CHECK( pcnt_unit_clear_count(pcnt_unit) );
+        ESP_ERROR_CHECK( pcnt_unit_disable(pcnt_unit) );
 
         // Change the state to STATE_LOW_ALT
         update_state_to(STATE_LOW_ALT);
