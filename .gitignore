@@ -2,3 +2,4 @@
 /.vscode
 /managed_components
 /mavlink
+.DS_Store
