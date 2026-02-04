@@ -8,8 +8,8 @@ RTOS based on-board computer attached to the drone in order to efficiently and w
 4) UART connection(no flow control) to a flight controller that reads current relative altitude of the drone. 
 5) State machine that enables unlimited amount of missions repeated one after another without ESP32 resets/reboots.
 
-##The PCB schematic
+## The PCB schematic
 ![alt text](./illustr/pcb.png)
 
-##The logic flow
+## The logic flow
 ![alt text](./illustr/logic.png)
